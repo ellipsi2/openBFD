@@ -3,6 +3,8 @@
 BFD3 콘텐츠 라이브러리를 읽어 연주하는 오픈소스 드럼 VI (JUCE / VST3).
 `.bfdlac` 오디오와 킷·프리셋 XML을 직접 읽는다. BFD 라이브러리는 포함하지 않는다.
 
+![믹서 뒷면: 마이크 케이블이 각 채널의 L/R 잭에 꽂혀 있다](docs/mixer-rear.png)
+
 ## 기능
 
 - **코덱**: BFDLAC 디코더 (16종 블록 알고리즘, 16/24-bit)
@@ -50,7 +52,7 @@ VST3는 `build/OpenBfd_artefacts/Release/VST3/openbfd.vst3`에 생성된다.
 | `openbfd-tests` | 단위 테스트. `OPENBFD_LIBRARY=<라이브러리 경로>`를 주면 실제 라이브러리 검증도 한다 |
 | `openbfd-decode` | `stats <file.bfdlac>` / `wav <file.bfdlac> <out.wav>` |
 | `openbfd-render` | 실제 프로세서로 킷을 WAV로 렌더 |
-| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare] [WxH]` |
+| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare] [WxH]`. `OPENBFD_SHOT_WAIT=<초>`를 주면 킷 로딩이 끝날 때까지 기다린다 |
 
 `tools/ref_bfdlac.py`는 파이썬 레퍼런스 디코더다.
 
@@ -66,7 +68,9 @@ VST3는 `build/OpenBfd_artefacts/Release/VST3/openbfd.vst3`에 생성된다.
 
 `Source/Bfdlac`, `Source/Model`, `Source/Engine`은 JUCE 없이 빌드된다(`openbfd_core`).
 
-## 고지
+## 라이선스
+
+[MIT](LICENSE)
 
 BFD는 inMusic Brands의 상표이며, 이 프로젝트는 inMusic과 관계가 없다.
 번들한 JetBrains Mono 글꼴은 SIL Open Font License 1.1을 따른다(`Resources/Fonts/OFL.txt`).
