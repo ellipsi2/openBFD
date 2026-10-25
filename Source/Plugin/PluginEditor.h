@@ -60,7 +60,8 @@ private:
     std::string cableKey_;
     bfdengine::Jack hotJack_;
     int flipBackToken_ = 0;
-    int voices_ = 0, layersReady_ = 0, layersTotal_ = 0;
+    int voices_ = 0, layersReady_ = 0, layersTotal_ = 0, layersDone_ = 0;
+    bool cacheFull_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenBfdEditor)
 };

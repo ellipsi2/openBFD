@@ -2,7 +2,8 @@
 // Usage: openbfd-ui-shot <out.png> [light|dark] [kit-or-preset] [front|rear|cable|bare] [WxH]
 //   Libraries come from BFD3's DataPaths.xml. "rear" turns the mixer around,
 //   "cable" photographs a cable in the hand on its way to a jack, "bare" the
-//   rear with the plugged cables hidden.
+//   rear with the plugged cables hidden. OPENBFD_SHOT_WAIT=<seconds> waits for
+//   the kit to finish loading.
 #include <JuceHeader.h>
 
 #include "Plugin/PluginEditor.h"
@@ -35,6 +36,10 @@ int main(int argc, char** argv) {
                 size.fromFirstOccurrenceOf("x", false, false).getIntValue());
     ed->syncNow();
     pump(200);
+    // OPENBFD_SHOT_WAIT=<seconds>: wait for the preload to finish first
+    const int waitMs = juce::SystemStats::getEnvironmentVariable("OPENBFD_SHOT_WAIT", "0").getIntValue() * 1000;
+    auto& engine = proc.engine();
+    for (int waited = 0; waited < waitMs && engine.layersDone() < engine.layersTotal() && !engine.cacheFull(); waited += 250) pump(250);
 
     if (view == "rear" || view == "bare") {
         ed->mixerPanel().flipTo(true);
@@ -75,5 +80,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("wrote %s (%dx%d)\n", argv[1], img.getWidth(), img.getHeight());
+    std::printf("layers %d/%d (tried %d), cache %zu/%zu MB\n", engine.layersReady(), engine.layersTotal(), engine.layersDone(),
+                engine.cache().bytesUsed() >> 20, engine.cache().budget() >> 20);
     return 0;
 }

@@ -209,6 +209,11 @@ public:
     // Loader progress (any thread).
     int layersReady() const { return layersReady_.load(std::memory_order_relaxed); }
     int layersTotal() const { return layersTotal_.load(std::memory_order_relaxed); }
+    // Layers the loader has tried (ready + failed). Below the total the
+    // loader is still working, unless the cache is full: then the rest loads
+    // on demand.
+    int layersDone() const { return layersDone_.load(std::memory_order_relaxed); }
+    bool cacheFull() const { return cache_.bytesUsed() >= cache_.budget(); }
     // Block until the current kit is fully loaded (tools/tests; not audio thread).
     bool waitUntilLoaded(int timeoutMs) const;
 
@@ -265,7 +270,7 @@ private:
     std::shared_ptr<ResolvedKit> loaderKit_; // guarded by loaderMutex_
     std::atomic<bool> loaderWake_{false};
     std::atomic<bool> quit_{false};
-    std::atomic<int> layersReady_{0}, layersTotal_{0};
+    std::atomic<int> layersReady_{0}, layersTotal_{0}, layersDone_{0};
     std::thread loader_;
 
     // audio thread

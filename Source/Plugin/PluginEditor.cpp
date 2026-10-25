@@ -149,9 +149,18 @@ void OpenBfdEditor::paint(juce::Graphics& g) {
     auto f = foot.reduced(14, 0).withTrimmedRight(14); // clear of the resize corner
     juce::String status = proc_.statusText();
     bool problem = proc_.statusIsProblem(), working = false;
-    if (status.isEmpty() && layersTotal_ > 0 && layersReady_ < layersTotal_) {
-        status = "Loading " + juce::String(layersReady_ * 100 / std::max(1, layersTotal_)) + "%";
-        working = true;
+    if (status.isEmpty() && layersDone_ < layersTotal_) {
+        // the loader stops at the cache budget: the rest loads when played
+        if (cacheFull_) {
+            status = "Cache full " + juce::String(layersTotal_ - layersDone_) + " on demand";
+            problem = true;
+        } else {
+            status = "Loading " + juce::String(layersDone_ * 100 / std::max(1, layersTotal_)) + "%";
+            working = true;
+        }
+    } else if (status.isEmpty() && layersReady_ < layersTotal_) {
+        status = juce::String(layersTotal_ - layersReady_) + " layers missing";
+        problem = true;
     } else if (status.isNotEmpty() && !problem) {
         working = true;
     }
@@ -260,11 +269,15 @@ void OpenBfdEditor::timerCallback() {
     mixer_.updateMeters(engine);
     for (int s = 0; s < bfdmodel::Kit::kMaxSlots; ++s)
         if (const float v = engine.takeSlotHit(s); v > 0.0f) stage_.hit(s, v);
-    const int voices = engine.activeVoices(), ready = engine.layersReady(), total = engine.layersTotal();
-    if (voices != voices_ || ready != layersReady_ || total != layersTotal_) {
+    const int voices = engine.activeVoices(), ready = engine.layersReady(), total = engine.layersTotal(),
+              done = engine.layersDone();
+    const bool full = engine.cacheFull();
+    if (voices != voices_ || ready != layersReady_ || total != layersTotal_ || done != layersDone_ || full != cacheFull_) {
         voices_ = voices;
         layersReady_ = ready;
         layersTotal_ = total;
+        layersDone_ = done;
+        cacheFull_ = full;
         repaint(getLocalBounds().removeFromTop(kHeaderH));
         repaint(getLocalBounds().removeFromBottom(kFooterH));
     }

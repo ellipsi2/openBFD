@@ -783,6 +783,7 @@ void Engine::rebuild() {
 
     layersTotal_.store(total);
     layersReady_.store(readyNow);
+    layersDone_.store(readyNow);
 
     std::shared_ptr<ResolvedKit> garbage, oldPending;
     {
@@ -889,7 +890,10 @@ void Engine::loaderMain() {
             }
         }
         std::lock_guard<std::mutex> lock(loaderMutex_);
-        if (loaderKit_ == k) layersReady_.store(k->ready.load());
+        if (loaderKit_ == k) {
+            layersReady_.store(k->ready.load());
+            layersDone_.store(k->done.load());
+        }
     }
 }
 

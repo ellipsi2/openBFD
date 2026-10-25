@@ -31,6 +31,9 @@ std::vector<int> preferredSlots(bfdmodel::PieceKind kind) {
 } // namespace
 
 OpenBfdProcessor::OpenBfdProcessor() : AudioProcessor(makeBuses()) {
+    // compressed layers stay resident: a quarter of the RAM, 2 to 16 GB
+    const auto ramMb = size_t(std::max(0, juce::SystemStats::getMemorySizeInMegabytes()));
+    engine_.cache().setBudget(std::clamp<size_t>(ramMb / 4, 2048, 16384) << 20);
     engine_.setKit(bfdmodel::Kit{});
     engine_.setMixer(bfdengine::MixerState{});
 }
