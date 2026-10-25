@@ -163,14 +163,18 @@ void testVelocityLayers() {
     art.layers.push_back({0.5f, 1.0f, 0, -20.0f, "b.bfdlac"});
     CHECK(bfdengine::pickLayer(art, 0.1f) == &art.layers[0]);
     CHECK(bfdengine::pickLayer(art, 0.9f) == &art.layers[1]);
-    const float gQuiet = bfdengine::layerGainDb(0.1f, -60.0f, 1.0f, -40.0f);
-    const float gLoud = bfdengine::layerGainDb(0.9f, -20.0f, 1.0f, -40.0f);
-    // compensation maps each layer onto the velocity target curve
-    const float outQuiet = -60.0f + gQuiet;
-    const float outLoud = -20.0f + gLoud;
-    CHECK(outLoud > outQuiet);
-    CHECK(std::abs(outQuiet - (-6.0f - 60.0f * 0.9f)) < 1e-3f);
-    CHECK(std::abs(outLoud - (-6.0f - 60.0f * 0.1f)) < 1e-3f);
+    const auto& L = art.layers;
+    // as recorded (dyn 0.5): bottom of a window plays at unity
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 0.5f)) < 1e-4f);
+    CHECK(std::abs(bfdengine::layerGainDb(L, 1, 1, 0.5f, 0.5f)) < 1e-4f);
+    // up a window the level slides towards the next layer: continuous at 0.5
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.25f, 0.5f) - 20.0f) < 1e-3f);
+    CHECK(bfdengine::layerGainDb(L, 0, 0, 0.4999f, 0.5f) > 39.9f);
+    // a stand-in is matched to the requested layer's loudness
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 1, 0.0f, 0.5f) - (-40.0f)) < 1e-4f);
+    // dyn 0 flattens to the loudest layer, dyn 1 doubles the range
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 0.0f) - 40.0f) < 1e-4f);
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 1.0f) - (-40.0f)) < 1e-4f);
 }
 
 void testRealLibrary() {
@@ -601,6 +605,37 @@ void testPresetRoundTrip() {
                 re.kit.name.c_str(), int(re.kit.pieces.size()));
 }
 
+void testPreloadCompletes() {
+    // Every layer of a piece with Alt/ round-robin sets must preload, not
+    // only the primary set.
+    const char* root = std::getenv("OPENBFD_LIBRARY");
+    if (!root) return;
+    bfdmodel::Library lib;
+    std::string err;
+    if (!bfdmodel::scanLibrary(root, &lib, &err)) return;
+    const bfdmodel::Piece* piece = nullptr;
+    for (const auto& p : lib.pieces) {
+        for (const auto& a : p->articulations)
+            if (a.hasRoundRobin()) piece = p.get();
+        if (piece) break;
+    }
+    if (!piece) return;
+    bfdengine::Engine engine;
+    engine.setLibraries({lib});
+    bfdmodel::Kit kit;
+    kit.slots.assign(32, {});
+    kit.pieces.resize(32);
+    const std::string ref = bfdmodel::pieceSlotKey(lib, *piece);
+    kit.slots[0] = ref;
+    kit.pieces[0].slotRef = ref;
+    engine.setKit(kit);
+    CHECK(engine.waitUntilLoaded(60000));
+    CHECK(engine.layersTotal() > 0);
+    CHECK(engine.layersDone() == engine.layersTotal());
+    CHECK(engine.layersReady() == engine.layersTotal());
+    std::printf("preload: %s %d/%d layers\n", piece->name.c_str(), engine.layersReady(), engine.layersTotal());
+}
+
 void testEngineSmoke() {
     const char* root = std::getenv("OPENBFD_LIBRARY");
     if (!root) return;
@@ -667,6 +702,7 @@ int main() {
     testRoundRobinGroups();
     testPresetRoundTrip();
     testRealLibrary();
+    testPreloadCompletes();
     testEngineSmoke();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

@@ -83,13 +83,6 @@ std::shared_ptr<SampleData> loadLayer(const std::string& path, bool streaming = 
         data->sampleRate = h.sampleRate > 0 ? h.sampleRate : 44100;
         data->blockSize = h.blockSize;
         data->streaming = true;
-        // Level statistics: one pass over the decoded ring after a full read.
-        // For streaming we defer this to a cheap partial estimate so loading
-        // stays bounded; a full pass happens if the caller uses the resident
-        // path later.
-        data->rms = 1.0f;
-        data->peak = 1.0f;
-        data->sumPeak = 1.0f;
         data->bytes = size_t(h.dataSize) / 4 + sizeof(SampleData); // ring budget estimate
         return data;
     }
@@ -103,30 +96,6 @@ std::shared_ptr<SampleData> loadLayer(const std::string& path, bool streaming = 
     data->sampleRate = h.sampleRate > 0 ? h.sampleRate : 44100;
     data->blockSize = h.blockSize;
 
-    // One full decode for the level statistics used by gain staging.
-    const int ch = h.channels;
-    const float scale = 1.0f / float(1 << (h.bitDepth - 1));
-    std::vector<int32_t> frame(size_t(h.blockSize) * size_t(ch));
-    double acc = 0.0;
-    float peak = 0.0f, sumPeak = 0.0f;
-    for (int fi = 0; fi < h.frameCount; ++fi) {
-        data->file.decodeFrame(fi, frame.data());
-        const int count = std::min(h.blockSize, h.frames - fi * h.blockSize);
-        for (int s = 0; s < count; ++s) {
-            float sum = 0.0f;
-            for (int c = 0; c < ch; ++c) {
-                const float v = float(frame[size_t(s) * size_t(ch) + size_t(c)]) * scale;
-                acc += double(v) * v;
-                peak = std::max(peak, std::abs(v));
-                sum += v;
-            }
-            sumPeak = std::max(sumPeak, std::abs(sum));
-        }
-    }
-    const double values = std::max(1.0, double(h.frames) * ch);
-    data->rms = float(std::sqrt(acc / values));
-    data->peak = std::max(peak, 1.0e-9f);
-    data->sumPeak = std::max(sumPeak, 1.0e-9f);
     data->bytes = size_t(h.dataSize) + sizeof(SampleData);
     return data;
 }
@@ -345,13 +314,23 @@ const VelLayer* pickLayer(const Articulation& art, float velocity01) {
     return i < 0 ? nullptr : &art.layers[size_t(i)];
 }
 
-float layerGainDb(float velocity01, float layerLoudness, float dyn, float meanLoudness) {
-    const float v = std::clamp(velocity01, 0.0f, 1.0f);
-    const float d = std::clamp(dyn, 0.0f, 1.0f);
-    // dyn=1: velocity maps to a 60 dB playback range (v=1 -> -6 dB).
-    // dyn=0: every layer plays at the articulation mean loudness.
-    const float targetDb = -6.0f + d * (-60.0f * (1.0f - v)) + (1.0f - d) * (meanLoudness + 6.0f);
-    return targetDb - layerLoudness;
+float layerGainDb(const std::vector<VelLayer>& layers, int want, int idx, float velocity01, float dyn) {
+    const int n = int(layers.size());
+    if (want < 0 || want >= n || idx < 0 || idx >= n) return 0.0f;
+    auto known = [](float db) { return db > -99.0f; }; // -100 = not measured
+    const VelLayer& w = layers[size_t(want)];
+    if (!known(w.loudness) || !known(layers[size_t(idx)].loudness)) return 0.0f;
+    float target = w.loudness;
+    if (want + 1 < n && known(layers[size_t(want + 1)].loudness) && w.velHi > w.velLo) {
+        const float t = std::clamp((velocity01 - w.velLo) / (w.velHi - w.velLo), 0.0f, 1.0f);
+        target += t * (layers[size_t(want + 1)].loudness - w.loudness);
+    }
+    float loudest = target;
+    for (const auto& l : layers)
+        if (known(l.loudness)) loudest = std::max(loudest, l.loudness);
+    const float k = std::clamp(dyn, 0.0f, 1.0f) * 2.0f;
+    target = loudest + (target - loudest) * k;
+    return target - layers[size_t(idx)].loudness;
 }
 
 // --- Voice ---------------------------------------------------------------
@@ -757,7 +736,8 @@ void Engine::rebuild() {
                 order.push_back(i);
             }
         };
-        // per-group spread order, interleaved across groups
+        // per-group spread order, interleaved across groups; indices are
+        // relative to the articulation's first layer
         std::vector<std::vector<int>> perGroup;
         for (const auto& sp : ra.rrGroups) perGroup.push_back(spreadOrder(sp.count));
         for (size_t round = 0;; ++round) {
@@ -765,7 +745,7 @@ void Engine::rebuild() {
             for (size_t g = 0; g < perGroup.size(); ++g) {
                 if (round >= perGroup[g].size()) continue;
                 any = true;
-                add(ra.rrGroups[g].first + perGroup[g][round] - ra.rrGroups[g].first);
+                add(ra.rrGroups[g].first - ra.first + perGroup[g][round]);
             }
             if (!any) break;
         }
@@ -842,6 +822,11 @@ void Engine::loaderMain() {
                         break;
                     }
                     ++k->cursor;
+                }
+                // backstop: nothing the order missed is left behind
+                for (int i = 0; i < k->layerCount && pick < 0 && k->done.load() < k->layerCount; ++i) {
+                    LayerSlot& s = k->layers[size_t(i)];
+                    if (!s.failed && !s.ready.load(std::memory_order_acquire)) pick = i;
                 }
             }
         }
@@ -973,14 +958,8 @@ void Engine::trigger(ResolvedKit& kit, const Routing& routing, const NoteEvent& 
     vp.routes = sr->routes;
     vp.routeCount = sr->routeCount;
 
-    // Level staging: place the layer's coherent channel-sum peak on the
-    // velocity target curve (the mics see the same hit in phase, so the sum -
-    // not any single channel - sets the output peak). A full-velocity hit
-    // lands at kHeadroomDb so a whole kit stacks without clipping the Mix bus.
-    const float dyn = std::clamp(sr->dyn, 0.0f, 1.0f);
-    const float targetDb = kHeadroomDb - (1.0f - velocity) * 30.0f * dyn;
-    const float peakDb = 20.0f * std::log10(std::max(sample->sumPeak, 1.0e-9f));
-    float gainDb = targetDb - peakDb;
+    // Level: the samples as recorded (see layerGainDb), plus the trims.
+    float gainDb = layerGainDb(*layers, want, idx, velocity, sr->dyn);
     gainDb += layer.dbTrim + ra.trimDb;
     gainDb += (sr->trim - 0.8f) * 12.0f; // kit trim knob (0.8 = unity)
     vp.gain = std::pow(10.0f, gainDb / 20.0f);
@@ -1101,8 +1080,9 @@ void Engine::mixStrips(const Routing& routing, float* const* outs, int offset, i
     float peakL = 0.0f, peakR = 0.0f;
     for (int i = 0; i < n; ++i) {
         masterGainNow_ += dm;
-        masterL[i] = softClip(masterL[i] * masterGainNow_);
-        masterR[i] = softClip(masterR[i] * masterGainNow_);
+        // float out, untouched: the host's gain staging decides about clipping
+        masterL[i] *= masterGainNow_;
+        masterR[i] *= masterGainNow_;
         peakL = std::max(peakL, std::abs(masterL[i]));
         peakR = std::max(peakR, std::abs(masterR[i]));
     }

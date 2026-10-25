@@ -37,17 +37,14 @@ inline constexpr int kMaxChannels = 32;   // shipped files use 7..16 mics
 inline constexpr int kMaxBlockSize = 1024; // BFDLAC frame size (Indx block)
 
 // One velocity layer: compressed file bytes + level statistics + decode ring.
-// `file` is the in-memory compressed representation used by fast paths and
-// level analysis; `stream` is the disk->ring streaming reader used by voices
+// `file` is the in-memory compressed representation used by fast paths;
+// `stream` is the disk->ring streaming reader used by voices
 // when the layer is too large to keep fully resident.
 struct SampleData {
     int channels = 0;
     int frames = 0;
     int sampleRate = 44100;
     int blockSize = kMaxBlockSize;
-    float rms = 1.0f;     // measured across all channels (diagnostics)
-    float peak = 1.0f;    // max abs sample on any single channel
-    float sumPeak = 1.0f; // max abs value of the coherent channel sum; level anchor
     size_t bytes = 0;     // resident (compressed) size
     bfdlac::File file;    // decoded on demand by voices (resident path)
     std::shared_ptr<bfdlac::StreamedFile> stream; // streaming path (disk -> ring)
@@ -238,7 +235,6 @@ public:
     static constexpr int kChunk = 256;    // internal render chunk (frames)
     static constexpr int kMaxVoices = 96;
     static constexpr int kMaxVoicesPerSlot = 8; // older repeats of a piece fade out
-    static constexpr float kHeadroomDb = -12.0f; // single full-velocity hit peak
 
 private:
     void rebuild();
@@ -296,15 +292,11 @@ std::string resolveLayerPath(const std::string& dir, const std::string& fileName
 
 // Velocity-layer selection helpers (shared with tests).
 const bfdmodel::VelLayer* pickLayer(const bfdmodel::Articulation& art, float velocity01);
-float layerGainDb(float velocity01, float layerLoudness, float dyn, float meanLoudness);
-
-// Transparent below 0.8, smoothly saturating above (bus safety, not a sound).
-inline float softClip(float x) {
-    constexpr float knee = 0.8f;
-    const float a = x < 0 ? -x : x;
-    if (a <= knee) return x;
-    const float y = knee + (1.0f - knee) * std::tanh((a - knee) / (1.0f - knee));
-    return x < 0 ? -y : y;
-}
+// Gain (dB) for a hit at `velocity01` that asks for layer `want` and plays
+// layer `idx` (a stand-in while `want` loads). Layers play as recorded; in a
+// velocity window the level slides towards the next layer's loudness, a
+// stand-in is matched to the requested layer's loudness, and `dyn` scales the
+// distance to the loudest layer (0.5 = as recorded, 0 = flat, 1 = doubled).
+float layerGainDb(const std::vector<bfdmodel::VelLayer>& layers, int want, int idx, float velocity01, float dyn);
 
 } // namespace bfdengine

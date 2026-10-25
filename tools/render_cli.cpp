@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     proc.engine().waitUntilLoaded(120000);
+    auto& engine = proc.engine();
+    std::printf("layers %d/%d (tried %d)%s\n", engine.layersReady(), engine.layersTotal(), engine.layersDone(),
+                engine.cacheFull() ? ", cache full" : "");
     proc.setRateAndBufferSizeDetails(sr, bs);
     proc.prepareToPlay(sr, bs);
 
@@ -68,17 +71,24 @@ int main(int argc, char** argv) {
     double edge = 0, inner = 0;
     long ne = 0, ni = 0;
     float peak = 0;
+    long hot = 0; // samples above 0 dBFS (would clip at a fixed-point output)
+    double power = 0;
     for (int c = 0; c < 2; ++c) {
         const float* x = mix.getReadPointer(c);
         for (int i = 1; i < total; ++i) {
             const double d = std::abs(x[i] - x[i - 1]);
             peak = std::max(peak, std::abs(x[i]));
+            if (std::abs(x[i]) > 1.0f) ++hot;
+            power += double(x[i]) * x[i];
             if (i % bs == 0) { edge += d; ++ne; } else { inner += d; ++ni; }
         }
     }
     std::printf("blocks over budget (%.2f ms): %d, worst %.2f ms\n", budgetMs, over, worst);
     std::printf("mix peak %.1f dBFS, boundary/inner step ratio %.2f (1.0 = seamless)\n",
                 20 * std::log10(std::max(peak, 1e-9f)), (edge / std::max(1L, ne)) / (inner / std::max(1L, ni)));
+    std::printf("mix rms %.1f dBFS, samples over 0 dBFS %ld (%.3f%%)\n",
+                10 * std::log10(std::max(power / std::max(1, 2 * total), 1e-18)), hot,
+                100.0 * double(hot) / std::max(1, 2 * total));
 
     juce::WavAudioFormat wav;
     juce::File outFile(argv[3]);
