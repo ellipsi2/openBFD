@@ -1,0 +1,66 @@
+// openbfd editor: library browser | kit stage | channel mixer, with mic cables
+// drawn over everything. Instrument-ui: sheet on ground, hairlines, mono labels.
+#pragma once
+
+#include <JuceHeader.h>
+
+#include "PluginProcessor.h"
+#include "UI/Browser.h"
+#include "UI/CableLayer.h"
+#include "UI/KitStage.h"
+#include "UI/MixerPanel.h"
+#include "UI/Theme.h"
+#include "UI/UiHost.h"
+
+class OpenBfdEditor : public juce::AudioProcessorEditor,
+                      public juce::DragAndDropContainer,
+                      public openbfd::ui::UiHost,
+                      private juce::ChangeListener,
+                      private juce::Timer {
+public:
+    explicit OpenBfdEditor(OpenBfdProcessor&);
+    ~OpenBfdEditor() override;
+
+    void paint(juce::Graphics&) override;
+    void resized() override;
+
+    // UiHost
+    OpenBfdProcessor& processor() override { return proc_; }
+    void setHint(const juce::String& text) override;
+    void cableBegin(const std::string& micKey, juce::Component& source, juce::Point<float> plugAt) override;
+    void cableMove(juce::Component& source, juce::Point<float> pos) override;
+    void cableEnd(juce::Component& source, juce::Point<float> pos) override;
+    const std::string& cableKey() const override { return cableKey_; }
+
+    // Tools (ui_shot): sync panels with the processor right now; panel access.
+    void syncNow();
+    openbfd::ui::KitStage& stage() { return stage_; }
+    openbfd::ui::MixerPanel& mixerPanel() { return mixer_; }
+
+private:
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
+    void timerCallback() override;
+    void applyTheme(bool dark);
+    void updateCables();
+    void chooseKitFile(bool save);
+    bfdengine::Jack jackUnder(juce::Point<float> editorPos) const;
+
+    OpenBfdProcessor& proc_;
+    openbfd::ui::LookAndFeel lnf_;
+    juce::TooltipWindow tooltips_{this, 600};
+
+    openbfd::ui::Browser browser_{*this};
+    openbfd::ui::KitStage stage_{*this};
+    openbfd::ui::MixerPanel mixer_{*this};
+    openbfd::ui::CableLayer cables_;
+    juce::TextButton open_{"OPEN"}, save_{"SAVE"}, theme_{"DARK"};
+    std::unique_ptr<juce::FileChooser> chooser_;
+
+    juce::String hint_;
+    std::string cableKey_;
+    bfdengine::Jack hotJack_;
+    int flipBackToken_ = 0;
+    int voices_ = 0, layersReady_ = 0, layersTotal_ = 0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenBfdEditor)
+};
