@@ -89,17 +89,26 @@ public:
     float backAmount() const; // 0 = front facing, 1 = rear facing (cables fade with it)
     bool pinned() const { return flip_.getToggleState(); }
 
-    // Rear jacks, in this panel's coordinates.
+    // Rear jacks, in this panel's coordinates; mid-turn they follow the face that is showing.
     bfdengine::Jack jackAt(juce::Point<float> local) const;
     juce::Point<float> socketCentre(bfdengine::Jack) const; // clamped to the visible rows
-    bool jackInView(bfdengine::Jack) const;
+    bool jackInView(bfdengine::Jack) const;                 // on the rear and not scrolled away
     void setHotJack(bfdengine::Jack);
 
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
+    struct Socket {
+        juce::Point<float> at;
+        bool inView = false;
+    };
+    using Sockets = std::array<Socket, size_t(bfdengine::kNumStrips) * 2>;
+
     void timerCallback() override;
+    Socket liveSocket(bfdengine::Jack) const; // laid out face, no turn
+    Socket socket(bfdengine::Jack) const;
+    Sockets allSockets() const;
     void applyFace(bool back);
     void layoutRows();
     void showCables(bool show);
@@ -122,6 +131,7 @@ private:
     float angle_ = 0.0f;
     double lastTick_ = 0.0;
     juce::Image frontShot_, backShot_;
+    Sockets frontSockets_, backSockets_; // where each face had its jacks when the turn began
 };
 
 } // namespace openbfd::ui

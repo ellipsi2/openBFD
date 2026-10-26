@@ -310,7 +310,23 @@ const KitStage::MicView* KitStage::micAt(P px) const {
     return best;
 }
 
+std::string KitStage::micKeyAt(P px) const {
+    const auto* mic = micAt(px);
+    return mic ? mic->key : std::string();
+}
+
 bool KitStage::micPoint(const std::string& key, P& out) const {
+    if (!micCentre(key, out)) return false;
+    for (const auto& m : mics_)
+        if (m.key == key && m.kind != MicKind::Bleed) {
+            // the cable leaves the rear of the capsule (glyph y = +8, rotated)
+            out += P(-std::sin(m.angle), std::cos(m.angle)) * 8.0f;
+            break;
+        }
+    return true;
+}
+
+bool KitStage::micCentre(const std::string& key, P& out) const {
     for (const auto& m : mics_)
         if (m.key == key) {
             P pos = m.pos;
@@ -489,7 +505,7 @@ void KitStage::paintMics(juce::Graphics& g) {
     if (locked) g.beginTransparencyLayer(0.35f);
     for (const auto& m : mics_) {
         P c;
-        micPoint(m.key, c);
+        micCentre(m.key, c);
         const auto jack = mixer.jackOf(m.key);
         const bool isHeld = m.key == held;
         const bool hover = m.key == hoverMic_;

@@ -1,5 +1,6 @@
 #include "CableLayer.h"
 
+#include "Motion.h"
 #include "Theme.h"
 #include "Widgets.h"
 
@@ -14,6 +15,9 @@ constexpr float kFloorDrag = 0.55f; // velocity kept along the floor once a cabl
 constexpr int kIterations = 28;
 constexpr float kStiffness = 0.06f; // a little bending stiffness: rounded, never kinked
 constexpr float kSeatRate = 0.16f;  // plug slides home in ~100 ms
+constexpr float kFaded = 0.32f;     // a cable whose jack is out of sight
+constexpr float kStepBack = 0.7f;   // how far the others fade while one is picked out
+constexpr float kRest = 0.02f;      // px per substep: below this a cable has come to rest
 
 // Slack a cable keeps between its ends: long runs hang in deep loops.
 float restLength(juce::Point<float> a, juce::Point<float> b) { return a.getDistanceFrom(b) * 1.12f + 42.0f; }
@@ -129,8 +133,17 @@ void CableLayer::step(Rope& r, float desired, float floor) {
     if (lead) pts[n - 2] = leadPt;
 }
 
+bool CableLayer::fading() const {
+    if (std::abs(others_ - (focusKey_.empty() ? 0.0f : 1.0f)) > 0.002f) return true;
+    for (const auto& [key, rope] : plugged_)
+        if (std::abs(rope.sight - (rope.shown ? 1.0f : 0.0f)) > 0.002f ||
+            std::abs(rope.focus - (key == focusKey_ ? 1.0f : 0.0f)) > 0.002f)
+            return true;
+    return false;
+}
+
 bool CableLayer::busy() const {
-    return held_.has_value() || !retracting_.empty() || (reveal_ > 0.0f && !plugged_.empty());
+    return held_.has_value() || !retracting_.empty() || (!plugged_.empty() && (moving_ || fading()));
 }
 
 void CableLayer::setPlugged(const std::vector<Ends>& ends) {
@@ -139,16 +152,20 @@ void CableLayer::setPlugged(const std::vector<Ends>& ends) {
         if (e.key == heldKey_ && held_) continue;
         auto it = plugged_.find(e.key);
         if (it != plugged_.end()) {
-            it->second.anchor = e.anchor;
-            it->second.plug = e.jack;
-            it->second.shown = e.shown;
-            next.emplace(e.key, std::move(it->second));
+            auto& rope = it->second;
+            if (rope.anchor.getDistanceFrom(e.anchor) > 0.01f || rope.plug.getDistanceFrom(e.jack) > 0.01f) moving_ = true;
+            rope.anchor = e.anchor;
+            rope.plug = e.jack;
+            rope.shown = e.shown;
+            next.emplace(e.key, std::move(rope));
             plugged_.erase(it);
         } else {
             auto rope = makeRope(e.anchor, e.jack, true);
             rope.onJack = true;
             rope.shown = e.shown;
+            rope.sight = e.shown ? 1.0f : 0.0f;
             next.emplace(e.key, std::move(rope));
+            moving_ = true;
         }
     }
     // displaced or unplugged cables reel back into their mics
@@ -167,6 +184,18 @@ void CableLayer::setReveal(float amount) {
     reveal_ = amount;
     if (busy() && !isTimerRunning()) startTimerHz(60);
     repaint();
+}
+
+void CableLayer::setEnabled(bool enabled) {
+    if (enabled == enabled_) return;
+    enabled_ = enabled;
+    repaint();
+}
+
+void CableLayer::setFocus(const std::string& key) {
+    if (key == focusKey_) return;
+    focusKey_ = key;
+    if (busy() && !isTimerRunning()) startTimerHz(60);
 }
 
 void CableLayer::beginDrag(const std::string& key, P anchor, P plug) {
@@ -200,7 +229,9 @@ void CableLayer::endDrag(bool plugged) {
     held_->held = false;
     if (plugged) {
         held_->onJack = true;
+        held_->sight = 1.0f;
         plugged_[heldKey_] = std::move(*held_);
+        moving_ = true;
     } else {
         held_->retract = 0.0f;
         held_->onJack = false;
@@ -212,10 +243,22 @@ void CableLayer::endDrag(bool plugged) {
 
 void CableLayer::timerCallback() {
     const float floor = float(getHeight()) - 3.0f;
+    constexpr double frameMs = 1000.0 / 60.0;
+    others_ = motion::step(others_, focusKey_.empty() ? 0.0f : 1.0f, frameMs, motion::slow);
+    for (auto& [key, rope] : plugged_) {
+        rope.sight = motion::step(rope.sight, rope.shown ? 1.0f : 0.0f, frameMs, motion::slow);
+        rope.focus = motion::step(rope.focus, key == focusKey_ ? 1.0f : 0.0f, frameMs, motion::slow);
+    }
+    float motionMax = 0.0f;
     for (int sub = 0; sub < kSubsteps; ++sub) {
         if (held_) step(*held_, restLength(held_->anchor, held_->plug), floor);
-        for (auto& [key, rope] : plugged_)
-            step(rope, restLength(rope.anchor, cableEnd(rope.plug, true, rope.seat)), floor);
+        if (moving_)
+            for (auto& [key, rope] : plugged_) {
+                step(rope, restLength(rope.anchor, cableEnd(rope.plug, true, rope.seat)), floor);
+                for (size_t i = 0; i < rope.pts.size(); ++i)
+                    motionMax = std::max(motionMax, rope.pts[i].getDistanceSquaredFrom(rope.prev[i]));
+                if (rope.seat < 1.0f) motionMax = 1.0f;
+            }
         for (auto& rope : retracting_) {
             // the plug is dragged back to the mic, which reels the cable in
             rope.retract += 1.0f / 40.0f;
@@ -226,12 +269,14 @@ void CableLayer::timerCallback() {
     retracting_.erase(std::remove_if(retracting_.begin(), retracting_.end(),
                                      [](const Rope& r) { return r.anchor.getDistanceFrom(r.plug) < 6.0f || r.retract > 1.5f; }),
                       retracting_.end());
+    // plugged cables that have come to rest stop simulating until something moves them
+    if (moving_ && motionMax < kRest * kRest) moving_ = false;
     repaint();
     if (!busy()) stopTimer();
 }
 
-void CableLayer::drawRope(juce::Graphics& g, const Rope& r, juce::Colour ink, float alpha, bool held) const {
-    if (r.pts.size() < 2 || alpha <= 0.0f || !r.shown) return;
+void CableLayer::drawRope(juce::Graphics& g, const Rope& r, juce::Colour ink, float alpha, bool held, float weight) const {
+    if (r.pts.size() < 2 || alpha <= 0.0f) return;
     const auto& pts = r.pts;
     juce::Path path;
     path.startNewSubPath(pts[0]);
@@ -243,9 +288,9 @@ void CableLayer::drawRope(juce::Graphics& g, const Rope& r, juce::Colour ink, fl
     const auto& p = pal();
     // a gap in the sheet colour under the cable keeps it readable over line work
     g.setColour(p.panel.withAlpha(alpha * 0.9f));
-    g.strokePath(path, juce::PathStrokeType(held ? 4.0f : 3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.strokePath(path, juce::PathStrokeType((held ? 4.0f : 3.2f) + weight, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour(ink.withMultipliedAlpha(alpha));
-    g.strokePath(path, juce::PathStrokeType(held ? 2.0f : 1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.strokePath(path, juce::PathStrokeType((held ? 2.0f : 1.6f) + weight, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     // plug: at a jack it points into the side face and sinks in as it seats;
     // anywhere else it hangs along the last stretch of cable
     float angle = -juce::MathConstants<float>::halfPi;
@@ -260,9 +305,20 @@ void CableLayer::drawRope(juce::Graphics& g, const Rope& r, juce::Colour ink, fl
 
 void CableLayer::paint(juce::Graphics& g) {
     const auto& p = pal();
-    if (reveal_ > 0.0f)
-        for (const auto& [key, rope] : plugged_) // the cable in the hand stands out
-            drawRope(g, rope, p.cable, reveal_ * (held_ ? 0.38f : 1.0f), false);
+    const Rope* picked = nullptr;
+    const auto plugged = [&](const Rope& rope) {
+        // follows the flip; faded while its jack is scrolled away, full strength as it comes into view
+        float alpha = enabled_ ? reveal_ * (kFaded + (1.0f - kFaded) * rope.sight) : 0.0f;
+        alpha *= 1.0f - kStepBack * others_ * (1.0f - rope.focus);
+        if (held_) alpha *= 0.38f; // the cable in the hand stands out
+        alpha = std::max(alpha, rope.focus * reveal_);
+        drawRope(g, rope, p.cable.interpolatedWith(p.accent, rope.focus), alpha, false, rope.focus * 0.6f);
+    };
+    for (const auto& [key, rope] : plugged_) {
+        if (rope.focus > 0.0f && key == focusKey_) picked = &rope;
+        else plugged(rope);
+    }
+    if (picked) plugged(*picked); // on top of the rest
     for (const auto& rope : retracting_)
         drawRope(g, rope, p.textDim, juce::jlimit(0.0f, 1.0f, 1.2f - rope.retract), false);
     if (held_) drawRope(g, *held_, held_->onJack ? p.accent : p.accent.withAlpha(0.85f), 1.0f, true);

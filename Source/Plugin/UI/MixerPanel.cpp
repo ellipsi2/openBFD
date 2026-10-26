@@ -616,23 +616,39 @@ bfdengine::Jack MixerPanel::jackAt(juce::Point<float> local) const {
     return {};
 }
 
-bool MixerPanel::jackInView(bfdengine::Jack j) const {
-    if (!j.valid() || !rows_[size_t(j.strip)]->isVisible()) return false;
-    const auto& r = *rows_[size_t(j.strip)];
-    const float y = getLocalPoint(&r, r.socketCentre(j.side)).y;
+MixerPanel::Socket MixerPanel::liveSocket(bfdengine::Jack j) const {
     const auto vb = viewport_.getBounds().toFloat();
-    return y >= vb.getY() && y <= vb.getBottom();
-}
-
-juce::Point<float> MixerPanel::socketCentre(bfdengine::Jack j) const {
-    const auto vb = viewport_.getBounds().toFloat();
-    if (!j.valid() || !rows_[size_t(j.strip)]->isVisible()) return {vb.getX(), vb.getCentreY()};
+    if (!j.valid() || !rows_[size_t(j.strip)]->isVisible()) return {{vb.getX(), vb.getCentreY()}, false};
     const auto& r = *rows_[size_t(j.strip)];
     auto c = getLocalPoint(&r, r.socketCentre(j.side));
+    const bool inView = face_ && c.y >= vb.getY() && c.y <= vb.getBottom();
     // a jack scrolled out of view: the cable runs to the edge of the list
     c.y = juce::jlimit(vb.getY() + 4.0f, vb.getBottom() - 4.0f, c.y);
-    return c;
+    return {c, inView};
 }
+
+MixerPanel::Sockets MixerPanel::allSockets() const {
+    Sockets out;
+    for (int s = 0; s < bfdengine::kNumStrips; ++s)
+        for (int side = 0; side < 2; ++side) out[size_t(s * 2 + side)] = liveSocket({s, side});
+    return out;
+}
+
+MixerPanel::Socket MixerPanel::socket(bfdengine::Jack j) const {
+    if (frontShot_.isNull() && backShot_.isNull()) return liveSocket(j);
+    if (!j.valid()) return {};
+    // turning: the jack rides on the face that is showing as it narrows
+    const float shown = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::pi * angle_);
+    const float sx = std::abs(std::cos(juce::MathConstants<float>::pi * shown));
+    auto s = (shown > 0.5f ? backSockets_ : frontSockets_)[size_t(j.strip * 2 + j.side)];
+    const float cx = body().toFloat().getCentreX();
+    s.at.x = cx + (s.at.x - cx) * sx;
+    return s;
+}
+
+bool MixerPanel::jackInView(bfdengine::Jack j) const { return socket(j).inView; }
+
+juce::Point<float> MixerPanel::socketCentre(bfdengine::Jack j) const { return socket(j).at; }
 
 void MixerPanel::setHotJack(bfdengine::Jack j) {
     if (j == hot_) return;
@@ -658,10 +674,14 @@ void MixerPanel::flipTo(bool back) {
     if (resting) {
         // photograph both faces (same rows, same scroll), then turn
         auto before = createComponentSnapshot(body(), true, 2.0f);
+        const auto socketsBefore = allSockets();
         applyFace(back);
         auto after = createComponentSnapshot(body(), true, 2.0f);
+        const auto socketsAfter = allSockets();
         frontShot_ = back ? before : after;
         backShot_ = back ? after : before;
+        frontSockets_ = back ? socketsBefore : socketsAfter;
+        backSockets_ = back ? socketsAfter : socketsBefore;
         viewport_.setVisible(false);
         master_->setVisible(false);
     }

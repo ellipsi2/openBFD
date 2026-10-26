@@ -19,6 +19,8 @@ public:
     void hit(int slot, float velocity);
     // Where the cable of `micKey` leaves its mic (stage coordinates).
     bool micPoint(const std::string& micKey, juce::Point<float>& out) const;
+    // The mic under `px` (stage coordinates), "" if none or the mics are locked.
+    std::string micKeyAt(juce::Point<float> px) const;
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -60,6 +62,7 @@ private:
     };
 
     void timerCallback() override;
+    bool micCentre(const std::string& micKey, juce::Point<float>& out) const;
     void layoutKit();
     juce::Point<float> toPx(juce::Point<float> in) const { return origin_ + in * ppi_; }
     juce::Point<float> toIn(juce::Point<float> px) const { return (px - origin_) / ppi_; }

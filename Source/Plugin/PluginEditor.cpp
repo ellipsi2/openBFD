@@ -7,6 +7,7 @@ using namespace openbfd::ui;
 
 namespace {
 constexpr int kHeaderH = 46, kFooterH = 30, kBrowserW = 280, kMixerW = 620;
+constexpr double kFocusDelayMs = 1200.0; // hover this long on a mic / jack / plug to pick out its cable
 #if JUCE_MAC
 constexpr const char* kCmdKey = "Cmd+";
 #else
@@ -240,7 +241,40 @@ void OpenBfdEditor::updateCables() {
                         mixer_.jackInView(jack)});
     }
     cables_.setPlugged(ends);
-    cables_.setReveal(proc_.showCables ? mixer_.backAmount() : 0.0f);
+    cables_.setEnabled(proc_.showCables);
+    cables_.setReveal(mixer_.backAmount());
+}
+
+std::string OpenBfdEditor::cableKeyAt(juce::Point<float> at) const {
+    if (!mixer_.showingBack()) return {}; // facing front: no cables to pick out
+    const auto& mx = proc_.mixer();
+    if (stage_.getBounds().toFloat().contains(at)) {
+        const auto key = stage_.micKeyAt(stage_.getLocalPoint(this, at));
+        if (!key.empty() && mx.jackOf(key).valid()) return key;
+    }
+    if (const auto jack = jackUnder(at); jack.valid())
+        if (const auto* key = mx.micAt(jack.strip, jack.side)) return *key;
+    // the plug itself, also where a jack scrolled away meets the edge of the list
+    for (const auto& [key, jack] : mx.patch) {
+        if (!jack.valid()) continue;
+        const auto tip = getLocalPoint(&mixer_, mixer_.socketCentre(jack));
+        if (juce::Rectangle<float>(tip.x - kPlugLength, tip.y - 6.0f, kPlugLength + 4.0f, 12.0f).contains(at)) return key;
+    }
+    return {};
+}
+
+void OpenBfdEditor::updateCableFocus() {
+    std::string key;
+    const auto mouse = juce::Desktop::getInstance().getMainMouseSource();
+    const auto* under = mouse.getComponentUnderMouse();
+    if (cableKey_.empty() && !mouse.isDragging() && under && (under == this || isParentOf(under)))
+        key = cableKeyAt(getLocalPoint(nullptr, mouse.getScreenPosition()));
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    if (key != hoverCable_) {
+        hoverCable_ = key;
+        hoverSince_ = now;
+    }
+    cables_.setFocus(!key.empty() && now - hoverSince_ >= kFocusDelayMs ? key : std::string());
 }
 
 void OpenBfdEditor::cableBegin(const std::string& micKey, juce::Component& source, juce::Point<float> plugAt) {
@@ -323,5 +357,6 @@ void OpenBfdEditor::timerCallback() {
     }
     // cables follow the flip and any piece being dragged
     updateCables();
+    updateCableFocus();
     updateUndoButtons(); // some edits (a piece moved, a bleed knob) send no change message
 }

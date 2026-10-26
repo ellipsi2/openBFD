@@ -44,6 +44,8 @@ private:
     void timerCallback() override;
     void applyTheme(bool dark);
     void updateCables();
+    void updateCableFocus();
+    std::string cableKeyAt(juce::Point<float> editorPos) const;
     void chooseKitFile(bool save);
     void updateUndoButtons();
     bfdengine::Jack jackUnder(juce::Point<float> editorPos) const;
@@ -62,6 +64,8 @@ private:
     juce::String hint_;
     std::string cableKey_;
     bfdengine::Jack hotJack_;
+    std::string hoverCable_; // plugged cable whose mic / jack / plug is under the mouse
+    double hoverSince_ = 0.0;
     int flipBackToken_ = 0;
     int voices_ = 0, layersReady_ = 0, layersTotal_ = 0, layersDone_ = 0;
     bool cacheFull_ = false;

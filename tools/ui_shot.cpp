@@ -41,7 +41,9 @@ int main(int argc, char** argv) {
     auto& engine = proc.engine();
     for (int waited = 0; waited < waitMs && engine.layersDone() < engine.layersTotal() && !engine.cacheFull(); waited += 250) pump(250);
 
-    if (view == "rear" || view == "bare") {
+    if (view == "front") {
+        pump(2500); // let the cables settle
+    } else if (view == "rear" || view == "bare") {
         ed->mixerPanel().flipTo(true);
         pump(2500); // let the cables settle
     } else if (view == "cable") {
