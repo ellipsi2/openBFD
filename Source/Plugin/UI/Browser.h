@@ -30,13 +30,24 @@ public:
 
 private:
     class RowList;
+    // The field keeps the command keys it edits with (select all, copy, cut,
+    // paste, undo); every other command shortcut (Cmd/Ctrl+S) goes on to the host.
+    class SearchField : public juce::TextEditor {
+    public:
+        bool keyPressed(const juce::KeyPress& key) override {
+            const auto c = juce::CharacterFunctions::toLowerCase(juce::juce_wchar(key.getKeyCode()));
+            if (key.getModifiers().isCommandDown() && c >= 'a' && c <= 'z' && juce::String("acvxzy").indexOfChar(c) < 0)
+                return false;
+            return juce::TextEditor::keyPressed(key);
+        }
+    };
     void textEditorTextChanged(juce::TextEditor&) override;
     void rebuildRows();
     void chooseFolder();
 
     UiHost& host_;
     Segment tabs_{juce::StringArray{"KITS", "PRESETS", "PIECES"}};
-    juce::TextEditor search_;
+    SearchField search_;
     juce::TextButton addFolder_{"+ FOLDER"};
     juce::Viewport viewport_;
     std::unique_ptr<RowList> list_;

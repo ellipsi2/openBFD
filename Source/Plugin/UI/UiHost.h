@@ -22,6 +22,9 @@ public:
     virtual void cableMove(juce::Component& source, juce::Point<float> pos) = 0;
     virtual void cableEnd(juce::Component& source, juce::Point<float> pos) = 0;
     virtual const std::string& cableKey() const = 0; // "" while no cable is held
+
+    // Stage mics stop taking the mouse (and draw faint) while locked.
+    virtual void setMicsLocked(bool locked) = 0;
 };
 
 } // namespace openbfd::ui

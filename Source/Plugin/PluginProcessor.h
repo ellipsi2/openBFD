@@ -71,6 +71,14 @@ public:
     void mutateMixer(const std::function<void(bfdengine::MixerState&)>& fn);
     void autoPatchAll(bool fresh); // fresh = forget every cable first
 
+    // --- undo (message thread) ---
+    // Every kit / mixer edit and every kit load is one step; a drag or a wheel
+    // spin on one control is one step however many edits it makes.
+    bool canUndo() const { return !undo_.empty(); }
+    bool canRedo() const { return !redo_.empty(); }
+    void undo();
+    void redo();
+
     // --- audition (message thread -> audio thread) ---
     void audition(int slot, float velocity);
     int noteForSlot(int slot) const; // first keymap note playing `slot`, -1 = none
@@ -88,12 +96,24 @@ public:
     // UI preferences carried in the plugin state.
     bool darkTheme = false;
     bool showCables = true; // plugged cables drawn while the mixer faces backwards
+    bool micsLocked = false; // stage mics ignore the mouse (pieces under them stay reachable)
 
 private:
     static BusesProperties makeBuses();
     void refreshMics(bool patchNew);
     void setStatus(const juce::String& text, bool problem);
     void publishLibrary(bfdmodel::Library lib, std::vector<bfdmodel::KitFileEntry> files);
+
+    struct Snapshot {
+        bfdmodel::Kit kit;
+        bfdengine::MixerState mixer;
+        std::vector<bfdmodel::KeymapEntry> keymap; // explicit map (empty = automatic)
+        bfdmodel::Preset preset;
+        juce::String loadedPath;
+    };
+    Snapshot snapshot() const;
+    void restore(Snapshot s);
+    void recordUndo(); // call before an edit, under modelLock_
 
     bfdengine::Engine engine_;
     juce::StringArray libraryRoots_;
@@ -104,6 +124,11 @@ private:
     bool statusProblem_ = false;
     juce::CriticalSection modelLock_;
     bfdmodel::Preset preset_; // full .bfd3 document (when loaded)
+
+    static constexpr size_t kUndoDepth = 64;
+    std::vector<Snapshot> undo_, redo_;
+    juce::int64 lastEditDown_ = -1; // mouse-down time of the gesture that made the last step
+    double lastEditMs_ = 0.0;
 
     std::thread scanThread_;
     std::atomic<bool> scanning_{false}, quitScan_{false};

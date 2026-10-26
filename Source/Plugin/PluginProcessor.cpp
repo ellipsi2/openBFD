@@ -222,6 +222,8 @@ bool OpenBfdProcessor::loadKitFile(const juce::String& path) {
     const bool program = ext == ".bfd3" || ext == ".bfd2";
     {
         const juce::ScopedLock lock(modelLock_);
+        recordUndo();
+        lastEditDown_ = -1; // a load never merges with the next edit
         if (pre.kit.name.empty()) pre.kit.name = juce::File(path).getFileNameWithoutExtension().toStdString();
         engine_.setKeymap(program ? bfdmodel::parseMidiMap(pre.midiMapXml) : std::vector<bfdmodel::KeymapEntry>{});
         engine_.setKit(pre.kit);
@@ -270,6 +272,7 @@ juce::String OpenBfdProcessor::kitName() const {
 
 void OpenBfdProcessor::mutateKit(const std::function<void(bfdmodel::Kit&)>& fn) {
     const juce::ScopedLock lock(modelLock_);
+    recordUndo();
     auto kit = engine_.kit();
     std::vector<std::string> before;
     for (const auto& p : kit.pieces) before.push_back(p.slotRef);
@@ -336,6 +339,7 @@ void OpenBfdProcessor::removePiece(int slot) {
 
 void OpenBfdProcessor::mutateMixer(const std::function<void(bfdengine::MixerState&)>& fn) {
     const juce::ScopedLock lock(modelLock_);
+    recordUndo();
     auto mx = engine_.mixer();
     fn(mx);
     engine_.setMixer(std::move(mx));
@@ -348,6 +352,61 @@ void OpenBfdProcessor::autoPatchAll(bool fresh) {
         bfdengine::autoPatch(mics_, mx);
     });
 }
+
+//==============================================================================
+// undo
+
+OpenBfdProcessor::Snapshot OpenBfdProcessor::snapshot() const {
+    return {engine_.kit(), engine_.mixer(), engine_.explicitKeymap(), preset_, loadedPath_};
+}
+
+void OpenBfdProcessor::recordUndo() {
+    // One step per gesture: edits made while the same mouse press is held, or
+    // in quick succession without a new press (a wheel spin), merge.
+    const auto& mouse = juce::Desktop::getInstance().getMainMouseSource();
+    const juce::int64 down = mouse.getLastMouseDownTime().toMilliseconds();
+    const bool held = juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown();
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    const bool merge = !undo_.empty() && down == lastEditDown_ && (held || now - lastEditMs_ < 500.0);
+    lastEditDown_ = down;
+    lastEditMs_ = now;
+    if (merge) return;
+    undo_.push_back(snapshot());
+    if (undo_.size() > kUndoDepth) undo_.erase(undo_.begin());
+    redo_.clear();
+}
+
+void OpenBfdProcessor::restore(Snapshot s) {
+    {
+        const juce::ScopedLock lock(modelLock_);
+        engine_.setKeymap(std::move(s.keymap));
+        engine_.setKit(std::move(s.kit));
+        mics_ = bfdengine::listMics(engine_.kit(), engine_.pieceLookup());
+        engine_.setMixer(std::move(s.mixer));
+        preset_ = std::move(s.preset);
+        loadedPath_ = s.loadedPath;
+        lastEditDown_ = -1; // the next edit starts a fresh step
+    }
+    sendChangeMessage();
+}
+
+void OpenBfdProcessor::undo() {
+    if (undo_.empty()) return;
+    auto s = std::move(undo_.back());
+    undo_.pop_back();
+    redo_.push_back(snapshot());
+    restore(std::move(s));
+}
+
+void OpenBfdProcessor::redo() {
+    if (redo_.empty()) return;
+    auto s = std::move(redo_.back());
+    redo_.pop_back();
+    undo_.push_back(snapshot());
+    restore(std::move(s));
+}
+
+//==============================================================================
 
 int OpenBfdProcessor::noteForSlot(int slot) const {
     int best = -1;
@@ -383,6 +442,7 @@ void OpenBfdProcessor::getStateInformation(juce::MemoryBlock& destData) {
     root.setAttribute("version", 2);
     root.setAttribute("dark", darkTheme);
     root.setAttribute("cables", showCables);
+    root.setAttribute("micsLocked", micsLocked);
     auto* libs = root.createNewChildElement("Libraries");
     for (const auto& r : libraryRoots_) libs->createNewChildElement("Root")->setAttribute("path", r);
     const juce::ScopedLock lock(modelLock_);
@@ -406,6 +466,7 @@ void OpenBfdProcessor::setStateInformation(const void* data, int sizeInBytes) {
     if (!root || !root->hasTagName("OpenBfdState")) return;
     darkTheme = root->getBoolAttribute("dark", darkTheme);
     showCables = root->getBoolAttribute("cables", showCables);
+    micsLocked = root->getBoolAttribute("micsLocked", micsLocked);
     juce::StringArray roots;
     if (auto* libs = root->getChildByName("Libraries")) {
         for (auto* r : libs->getChildWithTagNameIterator("Root")) roots.addIfNotAlreadyThere(r->getStringAttribute("path"));
@@ -431,6 +492,8 @@ void OpenBfdProcessor::setStateInformation(const void* data, int sizeInBytes) {
         mics_.clear();
         preset_ = bfdmodel::Preset{};
         preset_.kit = engine_.kit();
+        undo_.clear();
+        redo_.clear();
     }
     // libraries rescan in the background; the kit resolves as they arrive
     scanLibrariesAsync(roots);

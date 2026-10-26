@@ -23,6 +23,7 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    bool keyPressed(const juce::KeyPress&) override;
 
     // UiHost
     OpenBfdProcessor& processor() override { return proc_; }
@@ -31,6 +32,7 @@ public:
     void cableMove(juce::Component& source, juce::Point<float> pos) override;
     void cableEnd(juce::Component& source, juce::Point<float> pos) override;
     const std::string& cableKey() const override { return cableKey_; }
+    void setMicsLocked(bool locked) override;
 
     // Tools (ui_shot): sync panels with the processor right now; panel access.
     void syncNow();
@@ -43,6 +45,7 @@ private:
     void applyTheme(bool dark);
     void updateCables();
     void chooseKitFile(bool save);
+    void updateUndoButtons();
     bfdengine::Jack jackUnder(juce::Point<float> editorPos) const;
 
     OpenBfdProcessor& proc_;
@@ -53,7 +56,7 @@ private:
     openbfd::ui::KitStage stage_{*this};
     openbfd::ui::MixerPanel mixer_{*this};
     openbfd::ui::CableLayer cables_;
-    juce::TextButton open_{"OPEN"}, save_{"SAVE"}, theme_{"DARK"};
+    juce::TextButton undo_{"UNDO"}, redo_{"REDO"}, open_{"OPEN"}, save_{"SAVE"}, theme_{"DARK"};
     std::unique_ptr<juce::FileChooser> chooser_;
 
     juce::String hint_;

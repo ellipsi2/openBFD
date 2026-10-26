@@ -186,6 +186,7 @@ public:
     // automatic GM map built from the kit's piece kinds.
     void setKeymap(std::vector<bfdmodel::KeymapEntry> map);
     const std::vector<bfdmodel::KeymapEntry>& keymap() const { return activeKeymap_; }
+    const std::vector<bfdmodel::KeymapEntry>& explicitKeymap() const { return keymap_; }
     // Kit slot -> piece (nullptr = empty / not in any scanned library).
     PieceLookup pieceLookup() const;
 

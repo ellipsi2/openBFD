@@ -103,10 +103,12 @@ private:
     void applyFace(bool back);
     void layoutRows();
     void showCables(bool show);
+    void lockMics(bool locked);
+    void updateHeadButtons(); // cables on the rear, mic lock on the front
     juce::Rectangle<int> body() const;
 
     UiHost& host_;
-    juce::TextButton autoPatch_{"AUTO"}, flip_{"REAR"}, cables_{"HIDE CABLES"};
+    juce::TextButton autoPatch_{"AUTO"}, flip_{"REAR"}, cables_{"HIDE CABLES"}, micLock_{"LOCK MICS"};
     juce::Viewport viewport_;
     juce::Component holder_;
     std::array<std::unique_ptr<ChannelStrip>, bfdengine::kNumStrips> rows_;

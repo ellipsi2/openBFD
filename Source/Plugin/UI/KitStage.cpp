@@ -297,6 +297,7 @@ const KitStage::PieceView* KitStage::pieceAt(P px) const {
 }
 
 const KitStage::MicView* KitStage::micAt(P px) const {
+    if (host_.processor().micsLocked) return nullptr;
     const MicView* best = nullptr;
     float bestD = 12.0f;
     for (const auto& m : mics_) {
@@ -484,6 +485,8 @@ void KitStage::paintMics(juce::Graphics& g) {
     const auto& p = pal();
     const auto& mixer = host_.processor().mixer();
     const auto& held = host_.cableKey();
+    const bool locked = host_.processor().micsLocked;
+    if (locked) g.beginTransparencyLayer(0.35f);
     for (const auto& m : mics_) {
         P c;
         micPoint(m.key, c);
@@ -524,6 +527,7 @@ void KitStage::paintMics(juce::Graphics& g) {
         g.setColour(jack.valid() ? (isHeld ? p.accent : p.text) : p.textFaint);
         g.drawText(jackText, inner, juce::Justification::centredLeft, false);
     }
+    if (locked) g.endTransparencyLayer();
 }
 
 void KitStage::paintInspector(juce::Graphics& g) {

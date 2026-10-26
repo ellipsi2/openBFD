@@ -517,8 +517,12 @@ MixerPanel::MixerPanel(UiHost& host) : host_(host) {
     cables_.onClick = [this] { showCables(!host_.processor().showCables); };
     addAndMakeVisible(autoPatch_);
     addAndMakeVisible(flip_);
-    addAndMakeVisible(cables_);
+    micLock_.onClick = [this] { lockMics(!host_.processor().micsLocked); };
+    addChildComponent(cables_);
+    addChildComponent(micLock_);
     showCables(host_.processor().showCables);
+    lockMics(host_.processor().micsLocked);
+    updateHeadButtons();
 
     viewport_.setViewedComponent(&holder_, false);
     viewport_.setScrollBarsShown(true, false);
@@ -546,6 +550,18 @@ void MixerPanel::showCables(bool show) {
     cables_.setTooltip(show ? "Hide the plugged cables" : "Show the plugged cables");
 }
 
+void MixerPanel::lockMics(bool locked) {
+    host_.setMicsLocked(locked);
+    micLock_.setToggleState(locked, juce::dontSendNotification);
+    micLock_.setButtonText(locked ? "UNLOCK MICS" : "LOCK MICS");
+    micLock_.setTooltip(locked ? "Let the stage mics take the mouse again" : "Stage mics ignore the mouse");
+}
+
+void MixerPanel::updateHeadButtons() {
+    cables_.setVisible(target_);
+    micLock_.setVisible(!target_);
+}
+
 void MixerPanel::applyFace(bool back) {
     face_ = back;
     for (auto& r : rows_) r->setBack(back);
@@ -554,14 +570,11 @@ void MixerPanel::applyFace(bool back) {
 }
 
 void MixerPanel::layoutRows() {
-    // the patched channels keep their place on both faces; the rear lists the
-    // free channels underneath them
+    // channels in number order: the front shows the patched ones, the rear
+    // every channel
     order_.clear();
     for (int s = 0; s < bfdengine::kNumStrips; ++s)
-        if (rows_[size_t(s)]->isActive()) order_.push_back(s);
-    if (face_)
-        for (int s = 0; s < bfdengine::kNumStrips; ++s)
-            if (!rows_[size_t(s)]->isActive()) order_.push_back(s);
+        if (face_ || rows_[size_t(s)]->isActive()) order_.push_back(s);
     // never hide a row that stays: it may hold the mouse (a fader drag)
     for (int s = 0; s < bfdengine::kNumStrips; ++s)
         rows_[size_t(s)]->setVisible(std::find(order_.begin(), order_.end(), s) != order_.end());
@@ -641,6 +654,7 @@ void MixerPanel::flipTo(bool back) {
     if (back == target_ && resting) return;
     target_ = back;
     flip_.setToggleState(pinned(), juce::dontSendNotification);
+    updateHeadButtons();
     if (resting) {
         // photograph both faces (same rows, same scroll), then turn
         auto before = createComponentSnapshot(body(), true, 2.0f);
@@ -679,6 +693,7 @@ void MixerPanel::resized() {
     autoPatch_.setBounds(head.removeFromRight(58));
     head.removeFromRight(6);
     cables_.setBounds(head.removeFromRight(92));
+    micLock_.setBounds(cables_.getBounds());
     master_->setBounds(r.removeFromBottom(ChannelStrip::kMainH));
     r.removeFromBottom(1);
     viewport_.setBounds(r);

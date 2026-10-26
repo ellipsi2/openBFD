@@ -7,6 +7,11 @@ using namespace openbfd::ui;
 
 namespace {
 constexpr int kHeaderH = 46, kFooterH = 30, kBrowserW = 280, kMixerW = 620;
+#if JUCE_MAC
+constexpr const char* kCmdKey = "Cmd+";
+#else
+constexpr const char* kCmdKey = "Ctrl+";
+#endif
 } // namespace
 
 OpenBfdEditor::OpenBfdEditor(OpenBfdProcessor& p) : juce::AudioProcessorEditor(p), proc_(p) {
@@ -18,7 +23,11 @@ OpenBfdEditor::OpenBfdEditor(OpenBfdProcessor& p) : juce::AudioProcessorEditor(p
     addAndMakeVisible(stage_);
     addAndMakeVisible(mixer_);
     addAndMakeVisible(cables_);
-    for (auto* b : {&open_, &save_, &theme_}) addAndMakeVisible(*b);
+    for (auto* b : {&undo_, &redo_, &open_, &save_, &theme_}) addAndMakeVisible(*b);
+    undo_.setTooltip(juce::String("Undo  ") + kCmdKey + "Z");
+    redo_.setTooltip(juce::String("Redo  ") + kCmdKey + "Shift+Z");
+    undo_.onClick = [this] { proc_.undo(); };
+    redo_.onClick = [this] { proc_.redo(); };
     open_.setTooltip("Open a kit or preset");
     save_.setTooltip("Save the kit (.bfd3kit) or preset (.bfd3)");
     theme_.setTooltip("Light / dark");
@@ -27,6 +36,9 @@ OpenBfdEditor::OpenBfdEditor(OpenBfdProcessor& p) : juce::AudioProcessorEditor(p
     save_.onClick = [this] { chooseKitFile(true); };
     theme_.onClick = [this] { applyTheme(!proc_.darkTheme); };
 
+    // Clicks anywhere take the keyboard focus here (out of the search field),
+    // so the shortcuts below work and everything else goes on to the host.
+    setWantsKeyboardFocus(true);
     proc_.addChangeListener(this);
     setResizable(true, true);
     setResizeLimits(1180, 720, 2600, 1600);
@@ -46,7 +58,31 @@ void OpenBfdEditor::syncNow() {
     stage_.refresh();
     mixer_.sync();
     updateCables();
+    updateUndoButtons();
     repaint();
+}
+
+void OpenBfdEditor::updateUndoButtons() {
+    undo_.setEnabled(proc_.canUndo());
+    redo_.setEnabled(proc_.canRedo());
+}
+
+bool OpenBfdEditor::keyPressed(const juce::KeyPress& key) {
+    const auto cmd = juce::ModifierKeys::commandModifier, shift = juce::ModifierKeys::shiftModifier;
+    if (key == juce::KeyPress('z', cmd, 0)) {
+        proc_.undo();
+        return true;
+    }
+    if (key == juce::KeyPress('z', cmd | shift, 0) || key == juce::KeyPress('y', cmd, 0)) {
+        proc_.redo();
+        return true;
+    }
+    return false; // unused keys (Cmd/Ctrl+S, transport, ...) go on to the host
+}
+
+void OpenBfdEditor::setMicsLocked(bool locked) {
+    proc_.micsLocked = locked;
+    stage_.repaint();
 }
 
 void OpenBfdEditor::changeListenerCallback(juce::ChangeBroadcaster*) { syncNow(); }
@@ -96,6 +132,10 @@ void OpenBfdEditor::resized() {
     save_.setBounds(h.removeFromRight(56));
     h.removeFromRight(6);
     open_.setBounds(h.removeFromRight(56));
+    h.removeFromRight(14);
+    redo_.setBounds(h.removeFromRight(56));
+    h.removeFromRight(6);
+    undo_.setBounds(h.removeFromRight(56));
     updateCables();
 }
 
@@ -119,7 +159,7 @@ void OpenBfdEditor::paint(juce::Graphics& g) {
     g.setFont(Theme::get().mono(12.0f, true));
     g.drawText(proc_.kitName(), h.removeFromLeft(320), juce::Justification::centredLeft, true);
     // readouts, right-aligned before the buttons
-    auto readouts = header.withTrimmedRight(14 + 64 + 6 + 56 + 6 + 56 + 24);
+    auto readouts = header.withRight(undo_.getX() - 24);
     g.setFont(Theme::get().mono(10.5f));
     auto readout = [&](const juce::String& label, const juce::String& value) {
         const int vw = juce::GlyphArrangement::getStringWidthInt(g.getCurrentFont(), value);
@@ -283,4 +323,5 @@ void OpenBfdEditor::timerCallback() {
     }
     // cables follow the flip and any piece being dragged
     updateCables();
+    updateUndoButtons(); // some edits (a piece moved, a bleed knob) send no change message
 }
