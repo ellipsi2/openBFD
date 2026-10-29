@@ -1,5 +1,6 @@
 // Right panel: the channel mixer, one row per channel plus the master. Front =
-// levels (pan, fader, meter, mute / solo, output number). Rear = the patch bay
+// levels (pan, fader, meter, mute / solo, output number); a click on a row's
+// free space selects it and the stage lights up its mics. Rear = the patch bay
 // and the settings: every row's L and R input jacks on its side face, the mics
 // plugged into them and the row's bleed controls; the free channels follow.
 // The panel turns around on its own while a cable is in the hand.
@@ -83,6 +84,7 @@ public:
     ~MixerPanel() override;
 
     void sync();                                // patch / mixer / kit changed
+    void repaintRows();                         // the selected channel changed
     void updateMeters(bfdengine::Engine& engine); // ~30 Hz
     void flipTo(bool back);
     bool showingBack() const { return target_; }

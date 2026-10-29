@@ -335,7 +335,10 @@ void ChannelStrip::paintBack(juce::Graphics& g) {
 }
 
 void ChannelStrip::mouseMove(const juce::MouseEvent& e) {
-    if (!back_) return;
+    if (!back_) {
+        setMouseCursor(isMaster() ? juce::MouseCursor::NormalCursor : juce::MouseCursor::PointingHandCursor);
+        return;
+    }
     const int side = jackAt(e.position);
     if (side == hoverSide_) return;
     hoverSide_ = side;
@@ -355,6 +358,11 @@ void ChannelStrip::mouseExit(const juce::MouseEvent&) {
 
 void ChannelStrip::mouseDown(const juce::MouseEvent& e) {
     carrying_ = false;
+    if (!back_) {
+        // free space on the front: pick the channel, again to let go
+        if (!isMaster()) host_.selectStrip(host_.selectedStrip() == strip ? -1 : strip);
+        return;
+    }
     const int side = jackAt(e.position);
     if (side < 0) return;
     const auto* key = host_.processor().mixer().micAt(strip, side);
@@ -449,9 +457,14 @@ void ChannelStrip::paint(juce::Graphics& g) {
         return;
     }
     const auto& p = pal();
-    g.fillAll(p.panel);
+    const bool selected = !isMaster() && host_.selectedStrip() == strip;
+    g.fillAll(selected ? p.panelInset : p.panel);
     g.setColour(p.rule);
     g.fillRect(0, getHeight() - 1, getWidth(), 1); // row separator
+    if (selected) {
+        g.setColour(p.accent);
+        g.fillRect(0, 0, 2, getHeight() - 1);
+    }
 
     // --- info: number + mode, mic, piece ---
     auto info = info_.withTrimmedTop(7 + kPad);
@@ -594,8 +607,14 @@ void MixerPanel::layoutRows() {
 void MixerPanel::sync() {
     for (auto& r : rows_) r->sync();
     master_->sync();
+    // a channel that lost its mics is no longer on the front to stay selected
+    if (const int s = host_.selectedStrip(); s >= 0 && !rows_[size_t(s)]->isActive()) host_.selectStrip(-1);
     layoutRows();
     repaint();
+}
+
+void MixerPanel::repaintRows() {
+    for (auto& r : rows_) r->repaint();
 }
 
 void MixerPanel::updateMeters(bfdengine::Engine& engine) {

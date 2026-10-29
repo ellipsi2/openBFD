@@ -275,6 +275,11 @@ void KitStage::layoutKit() {
         selected_ = -1;
 }
 
+void KitStage::selectPiece(int slot) {
+    selected_ = slot;
+    repaint();
+}
+
 //==============================================================================
 // geometry + hit tests
 
@@ -502,6 +507,8 @@ void KitStage::paintMics(juce::Graphics& g) {
     const auto& mixer = host_.processor().mixer();
     const auto& held = host_.cableKey();
     const bool locked = host_.processor().micsLocked;
+    const int strip = host_.selectedStrip();
+    std::vector<std::pair<P, float>> chosen; // mics of the selected channel: centre, amount
     if (locked) g.beginTransparencyLayer(0.35f);
     for (const auto& m : mics_) {
         P c;
@@ -510,7 +517,10 @@ void KitStage::paintMics(juce::Graphics& g) {
         const bool isHeld = m.key == held;
         const bool hover = m.key == hoverMic_;
         const float h = motion::follow(*this, "mh" + juce::String(m.key), hover || isHeld ? 1.0f : 0.0f, motion::quick);
-        auto ink = (jack.valid() ? p.text : p.textDim).interpolatedWith(p.accent, isHeld ? 1.0f : h);
+        const float sel = motion::follow(*this, "ms" + juce::String(m.key),
+                                         jack.valid() && jack.strip == strip ? 1.0f : 0.0f, motion::quick);
+        if (sel > 0.0f) chosen.push_back({c, sel});
+        auto ink = (jack.valid() ? p.text : p.textDim).interpolatedWith(p.accent, isHeld ? 1.0f : std::max(h, sel));
         if (m.hidden) ink = ink.withMultipliedAlpha(0.6f);
         if (m.kind == MicKind::Bleed) drawBleedSource(g, c, ink, p.panel);
         else drawMic(g, c, m.angle, m.kind == MicKind::Ambient, ink, p.panel);
@@ -533,17 +543,22 @@ void KitStage::paintMics(juce::Graphics& g) {
         g.setColour(p.panel.withAlpha(0.92f));
         g.fillRect(box);
         if (jack.valid()) {
-            g.setColour(isHeld ? p.accent : p.ruleStrong);
+            g.setColour(isHeld ? p.accent : p.ruleStrong.interpolatedWith(p.accent, sel));
             g.drawRect(box, 1);
         }
         auto inner = box.reduced(4, 0);
         g.setColour(p.textDim);
         g.drawText(code, inner.removeFromLeft(cw), juce::Justification::centredLeft, false);
         inner.removeFromLeft(5);
-        g.setColour(jack.valid() ? (isHeld ? p.accent : p.text) : p.textFaint);
+        g.setColour(jack.valid() ? (isHeld ? p.accent : p.text.interpolatedWith(p.accent, sel)) : p.textFaint);
         g.drawText(jackText, inner, juce::Justification::centredLeft, false);
     }
     if (locked) g.endTransparencyLayer();
+    // the selected channel's mics, framed at full strength even when the mics are locked
+    for (const auto& [c, sel] : chosen) {
+        g.setColour(p.accent.withMultipliedAlpha(sel));
+        draw::reticle(g, juce::Rectangle<float>(30.0f, 30.0f).withCentre(c), 0.22f);
+    }
 }
 
 void KitStage::paintInspector(juce::Graphics& g) {
@@ -563,8 +578,8 @@ void KitStage::paintInspector(juce::Graphics& g) {
                              piece ? juce::String(piece->libraryLong.empty() ? piece->library : piece->libraryLong)
                                    : dashText()};
     const int w = 230, rowH = 15, h = labels.size() * rowH + 12;
-    auto box = juce::Rectangle<int>(juce::roundToInt(origin_.x + kHalfW * ppi_) - 10 - w,
-                                    juce::roundToInt(origin_.y + kHalfH * ppi_) - 10 - h, w, h);
+    // in the corner of the floor (the dot field), clear of the riser where it can
+    auto box = juce::Rectangle<int>(juce::roundToInt(frame_.getRight()) - w, juce::roundToInt(frame_.getBottom()) - h, w, h);
     g.setColour(p.panel);
     g.fillRect(box);
     g.setColour(p.ruleStrong);

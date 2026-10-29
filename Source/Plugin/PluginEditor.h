@@ -33,6 +33,8 @@ public:
     void cableEnd(juce::Component& source, juce::Point<float> pos) override;
     const std::string& cableKey() const override { return cableKey_; }
     void setMicsLocked(bool locked) override;
+    int selectedStrip() const override { return selectedStrip_; }
+    void selectStrip(int strip) override;
 
     // Tools (ui_shot): sync panels with the processor right now; panel access.
     void syncNow();
@@ -53,6 +55,7 @@ private:
     OpenBfdProcessor& proc_;
     openbfd::ui::LookAndFeel lnf_;
     juce::TooltipWindow tooltips_{this, 600};
+    int selectedStrip_ = -1; // before the panels: the mixer reads it while it is built
 
     openbfd::ui::Browser browser_{*this};
     openbfd::ui::KitStage stage_{*this};

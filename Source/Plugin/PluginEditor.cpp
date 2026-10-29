@@ -86,6 +86,13 @@ void OpenBfdEditor::setMicsLocked(bool locked) {
     stage_.repaint();
 }
 
+void OpenBfdEditor::selectStrip(int strip) {
+    if (strip == selectedStrip_) return;
+    selectedStrip_ = strip;
+    mixer_.repaintRows();
+    stage_.repaint();
+}
+
 void OpenBfdEditor::changeListenerCallback(juce::ChangeBroadcaster*) { syncNow(); }
 
 void OpenBfdEditor::applyTheme(bool dark) {

@@ -52,7 +52,7 @@ VST3는 `build/OpenBfd_artefacts/Release/VST3/openbfd.vst3`에 생성된다.
 | `openbfd-tests` | 단위 테스트. `OPENBFD_LIBRARY=<라이브러리 경로>`를 주면 실제 라이브러리 검증도 한다 |
 | `openbfd-decode` | `stats <file.bfdlac>` / `wav <file.bfdlac> <out.wav>` |
 | `openbfd-render` | 실제 프로세서로 킷을 WAV로 렌더 |
-| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare] [WxH]`. `OPENBFD_SHOT_WAIT=<초>`를 주면 킷 로딩이 끝날 때까지 기다린다 |
+| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare\|select] [WxH]`. `OPENBFD_SHOT_WAIT=<초>`를 주면 킷 로딩이 끝날 때까지 기다린다 |
 
 `tools/ref_bfdlac.py`는 파이썬 레퍼런스 디코더다.
 

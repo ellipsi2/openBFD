@@ -16,6 +16,7 @@ public:
     explicit KitStage(UiHost& host);
 
     void refresh();                 // kit, mics or patch changed
+    void selectPiece(int slot);     // -1 = none (the inspector closes)
     void hit(int slot, float velocity);
     // Where the cable of `micKey` leaves its mic (stage coordinates).
     bool micPoint(const std::string& micKey, juce::Point<float>& out) const;
