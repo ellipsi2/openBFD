@@ -23,12 +23,16 @@ OpenBfdEditor::OpenBfdEditor(OpenBfdProcessor& p) : juce::AudioProcessorEditor(p
     addAndMakeVisible(browser_);
     addAndMakeVisible(stage_);
     addAndMakeVisible(mixer_);
+    addChildComponent(keymap_);
     addAndMakeVisible(cables_);
-    for (auto* b : {&undo_, &redo_, &open_, &save_, &theme_}) addAndMakeVisible(*b);
+    for (auto* b : {&undo_, &redo_, &keys_, &open_, &save_, &theme_}) addAndMakeVisible(*b);
     undo_.setTooltip(juce::String("Undo  ") + kCmdKey + "Z");
     redo_.setTooltip(juce::String("Redo  ") + kCmdKey + "Shift+Z");
     undo_.onClick = [this] { proc_.undo(); };
     redo_.onClick = [this] { proc_.redo(); };
+    keys_.setClickingTogglesState(true);
+    keys_.setTooltip("MIDI notes for every articulation");
+    keys_.onClick = [this] { showKeymap(keys_.getToggleState()); };
     open_.setTooltip("Open a kit or preset");
     save_.setTooltip("Save the kit (.bfd3kit) or preset (.bfd3)");
     theme_.setTooltip("Light / dark");
@@ -58,9 +62,18 @@ void OpenBfdEditor::syncNow() {
     browser_.refresh();
     stage_.refresh();
     mixer_.sync();
+    keymap_.sync();
     updateCables();
     updateUndoButtons();
     repaint();
+}
+
+void OpenBfdEditor::showKeymap(bool show) {
+    keys_.setToggleState(show, juce::dontSendNotification);
+    keymap_.setVisible(show);
+    mixer_.setVisible(!show);
+    if (show) keymap_.sync();
+    updateCables();
 }
 
 void OpenBfdEditor::updateUndoButtons() {
@@ -130,6 +143,7 @@ void OpenBfdEditor::resized() {
     r.removeFromLeft(1);
     const int mixerW = std::min(kMixerW, std::max(420, r.getWidth() / 2));
     mixer_.setBounds(r.removeFromRight(mixerW));
+    keymap_.setBounds(mixer_.getBounds());
     r.removeFromRight(1);
     stage_.setBounds(r);
     cables_.setBounds(getLocalBounds());
@@ -140,6 +154,8 @@ void OpenBfdEditor::resized() {
     save_.setBounds(h.removeFromRight(56));
     h.removeFromRight(6);
     open_.setBounds(h.removeFromRight(56));
+    h.removeFromRight(14);
+    keys_.setBounds(h.removeFromRight(70));
     h.removeFromRight(14);
     redo_.setBounds(h.removeFromRight(56));
     h.removeFromRight(6);
@@ -234,7 +250,7 @@ void OpenBfdEditor::setHint(const juce::String& text) {
 // cables
 
 bfdengine::Jack OpenBfdEditor::jackUnder(juce::Point<float> editorPos) const {
-    if (!mixer_.showingBack()) return {};
+    if (!mixer_.isVisible() || !mixer_.showingBack()) return {};
     return mixer_.jackAt(mixer_.getLocalPoint(this, editorPos));
 }
 
@@ -248,12 +264,12 @@ void OpenBfdEditor::updateCables() {
                         mixer_.jackInView(jack)});
     }
     cables_.setPlugged(ends);
-    cables_.setEnabled(proc_.showCables);
+    cables_.setEnabled(proc_.showCables && mixer_.isVisible());
     cables_.setReveal(mixer_.backAmount());
 }
 
 std::string OpenBfdEditor::cableKeyAt(juce::Point<float> at) const {
-    if (!mixer_.showingBack()) return {}; // facing front: no cables to pick out
+    if (!mixer_.isVisible() || !mixer_.showingBack()) return {}; // facing front: no cables to pick out
     const auto& mx = proc_.mixer();
     if (stage_.getBounds().toFloat().contains(at)) {
         const auto key = stage_.micKeyAt(stage_.getLocalPoint(this, at));
@@ -286,6 +302,7 @@ void OpenBfdEditor::updateCableFocus() {
 
 void OpenBfdEditor::cableBegin(const std::string& micKey, juce::Component& source, juce::Point<float> plugAt) {
     ++flipBackToken_; // a pending turn back to the front is off
+    if (keymap_.isVisible()) showKeymap(false); // the jacks are on the mixer
     cableKey_ = micKey;
     hotJack_ = {};
     mixer_.flipTo(true);
@@ -348,6 +365,10 @@ void OpenBfdEditor::cableEnd(juce::Component& source, juce::Point<float> pos) {
 void OpenBfdEditor::timerCallback() {
     auto& engine = proc_.engine();
     mixer_.updateMeters(engine);
+    if (const auto serial = proc_.noteInSerial(); serial != noteInSerial_) {
+        noteInSerial_ = serial;
+        keymap_.noteIn(proc_.lastNoteIn());
+    }
     for (int s = 0; s < bfdmodel::Kit::kMaxSlots; ++s)
         if (const float v = engine.takeSlotHit(s); v > 0.0f) stage_.hit(s, v);
     const int voices = engine.activeVoices(), ready = engine.layersReady(), total = engine.layersTotal(),

@@ -28,6 +28,38 @@ std::vector<int> preferredSlots(bfdmodel::PieceKind kind) {
     }
     return {};
 }
+// An explicit map never runs empty: an empty one would select the auto map.
+// This entry plays nothing (the engine skips notes outside 0..127).
+void keepExplicit(std::vector<bfdmodel::KeymapEntry>& map) {
+    if (map.empty()) map.push_back({-1, -1, {}, -1});
+}
+
+// A kit edit keeps an explicit map: slots that still hold the same piece keep
+// their notes, a slot that got a new piece takes its auto-map notes that are
+// still free, and a slot that was emptied loses its notes.
+std::vector<bfdmodel::KeymapEntry> adaptKeymap(const std::vector<bfdmodel::KeymapEntry>& active,
+                                               const std::vector<std::string>& before, const bfdmodel::Kit& kit,
+                                               const bfdengine::PieceLookup& pieceAt) {
+    auto refAt = [](const std::vector<std::string>& refs, int slot) {
+        return slot >= 0 && size_t(slot) < refs.size() ? refs[size_t(slot)] : std::string();
+    };
+    std::vector<std::string> after;
+    for (const auto& p : kit.pieces) after.push_back(p.slotRef);
+    std::vector<bfdmodel::KeymapEntry> out;
+    std::vector<char> used(128, 0);
+    for (const auto& k : active)
+        if (k.note >= 0 && k.note < 128 && !refAt(after, k.slot).empty() && refAt(before, k.slot) == refAt(after, k.slot)) {
+            out.push_back({k.note, k.slot, k.articulation, -1});
+            used[size_t(k.note)] = 1;
+        }
+    for (const auto& k : bfdmodel::autoKeymap(kit, pieceAt))
+        if (refAt(before, k.slot) != refAt(after, k.slot) && !used[size_t(k.note)]) {
+            out.push_back(k);
+            used[size_t(k.note)] = 1;
+        }
+    keepExplicit(out);
+    return out;
+}
 } // namespace
 
 OpenBfdProcessor::OpenBfdProcessor() : AudioProcessor(makeBuses()) {
@@ -82,7 +114,11 @@ void OpenBfdProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Midi
         const auto msg = metadata.getMessage();
         if (numEvents >= int(events.size())) break;
         const int offset = juce::jlimit(0, juce::jmax(0, n - 1), metadata.samplePosition);
-        if (msg.isNoteOn()) events[size_t(numEvents++)] = {msg.getNoteNumber(), msg.getFloatVelocity(), true, offset};
+        if (!msg.isNoteOn()) continue;
+        events[size_t(numEvents++)] = {msg.getNoteNumber(), msg.getFloatVelocity(), true, offset};
+        lastNoteIn_.store(msg.getNoteNumber(), std::memory_order_relaxed);
+        lastVelocityIn_.store(msg.getFloatVelocity(), std::memory_order_relaxed);
+        noteInSerial_.fetch_add(1, std::memory_order_release);
     }
     midi.clear();
 
@@ -280,8 +316,18 @@ void OpenBfdProcessor::mutateKit(const std::function<void(bfdmodel::Kit&)>& fn) 
     std::vector<std::string> after;
     for (const auto& p : kit.pieces) after.push_back(p.slotRef);
     const bool structural = before != after;
-    if (structural) engine_.setKeymap({}); // an edited kit plays on the GM auto map
-    engine_.setKit(std::move(kit));
+    if (structural && !engine_.explicitKeymap().empty()) {
+        bfdengine::PieceLookup pieceAt(kit.pieces.size(), nullptr);
+        for (size_t i = 0; i < kit.pieces.size(); ++i) {
+            auto ref = kit.pieces[i].slotRef;
+            std::replace(ref.begin(), ref.end(), '\\', '/');
+            if (!ref.empty()) pieceAt[i] = engine_.findPiece(ref);
+        }
+        auto map = adaptKeymap(engine_.keymap(), before, kit, pieceAt);
+        engine_.setKitAndKeymap(std::move(kit), std::move(map));
+    } else {
+        engine_.setKit(std::move(kit));
+    }
     if (structural) {
         refreshMics(true);
         sendChangeMessage();
@@ -335,6 +381,54 @@ void OpenBfdProcessor::removePiece(int slot) {
 }
 
 //==============================================================================
+// keymap
+
+void OpenBfdProcessor::editKeymap(const std::function<void(std::vector<bfdmodel::KeymapEntry>&)>& fn) {
+    const juce::ScopedLock lock(modelLock_);
+    recordUndo();
+    // Start from what plays now, by articulation name (a preset map's indices
+    // are resolved, auto-map names the piece lacks become the stroke they play).
+    const auto pieceAt = engine_.pieceLookup();
+    std::vector<bfdmodel::KeymapEntry> map;
+    for (const auto& k : engine_.keymap()) {
+        if (k.note < 0 || k.note > 127) continue;
+        auto e = k;
+        e.articIndex = -1;
+        const auto* piece = k.slot >= 0 && size_t(k.slot) < pieceAt.size() ? pieceAt[size_t(k.slot)] : nullptr;
+        if (const auto* art = piece ? bfdengine::resolveArticulation(*piece, k.articulation) : nullptr)
+            e.articulation = art->name;
+        map.push_back(std::move(e));
+    }
+    fn(map);
+    keepExplicit(map);
+    engine_.setKeymap(std::move(map));
+    sendChangeMessage();
+}
+
+void OpenBfdProcessor::assignNote(int note, int slot, const std::string& articulation) {
+    if (note < 0 || note > 127 || slot < 0) return;
+    editKeymap([&](std::vector<bfdmodel::KeymapEntry>& map) {
+        map.erase(std::remove_if(map.begin(), map.end(), [&](const auto& k) { return k.note == note; }), map.end());
+        map.push_back({note, slot, articulation, -1});
+        std::sort(map.begin(), map.end(), [](const auto& a, const auto& b) { return a.note < b.note; });
+    });
+}
+
+void OpenBfdProcessor::clearNote(int note) {
+    editKeymap([&](std::vector<bfdmodel::KeymapEntry>& map) {
+        map.erase(std::remove_if(map.begin(), map.end(), [&](const auto& k) { return k.note == note; }), map.end());
+    });
+}
+
+void OpenBfdProcessor::resetKeymap() {
+    const juce::ScopedLock lock(modelLock_);
+    if (engine_.explicitKeymap().empty()) return;
+    recordUndo();
+    engine_.setKeymap({});
+    sendChangeMessage();
+}
+
+//==============================================================================
 // mixer
 
 void OpenBfdProcessor::mutateMixer(const std::function<void(bfdengine::MixerState&)>& fn) {
@@ -379,8 +473,7 @@ void OpenBfdProcessor::recordUndo() {
 void OpenBfdProcessor::restore(Snapshot s) {
     {
         const juce::ScopedLock lock(modelLock_);
-        engine_.setKeymap(std::move(s.keymap));
-        engine_.setKit(std::move(s.kit));
+        engine_.setKitAndKeymap(std::move(s.kit), std::move(s.keymap));
         mics_ = bfdengine::listMics(engine_.kit(), engine_.pieceLookup());
         engine_.setMixer(std::move(s.mixer));
         preset_ = std::move(s.preset);
@@ -421,9 +514,10 @@ int OpenBfdProcessor::noteForSlot(int slot) const {
     return best;
 }
 
-void OpenBfdProcessor::audition(int slot, float velocity) {
-    const int note = noteForSlot(slot);
-    if (note < 0) return;
+void OpenBfdProcessor::audition(int slot, float velocity) { auditionNote(noteForSlot(slot), velocity); }
+
+void OpenBfdProcessor::auditionNote(int note, float velocity) {
+    if (note < 0 || note > 127) return;
     const uint32_t head = uiHead_.load(std::memory_order_relaxed);
     if (head - uiTail_.load(std::memory_order_acquire) >= uiEvents_.size()) return; // full
     uiEvents_[head % uiEvents_.size()] = {note, juce::jlimit(0.0f, 1.0f, velocity), true, 0};
@@ -448,8 +542,8 @@ void OpenBfdProcessor::getStateInformation(juce::MemoryBlock& destData) {
     const juce::ScopedLock lock(modelLock_);
     root.createNewChildElement("Kit")->addTextElement(juce::String(bfdmodel::kitToXml(engine_.kit(), true)));
     root.createNewChildElement("Mixer")->addTextElement(juce::String(bfdengine::mixerToXml(engine_.mixer())));
-    if (!preset_.midiMapXml.empty() && !engine_.keymap().empty()) {
-        // explicit map from a preset: keep the resolved entries
+    if (!engine_.explicitKeymap().empty()) {
+        // explicit map (a preset's or edited): keep the resolved entries
         auto* km = root.createNewChildElement("Keymap");
         for (const auto& k : engine_.keymap()) {
             auto* e = km->createNewChildElement("Key");

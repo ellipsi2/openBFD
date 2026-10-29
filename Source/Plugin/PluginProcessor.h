@@ -79,8 +79,24 @@ public:
     void undo();
     void redo();
 
+    // --- keymap (message thread) ---
+    // The map MIDI plays: an explicit one (a preset's, or edited here) or the
+    // GM auto map built from the kit. The first edit makes the auto map explicit.
+    const std::vector<bfdmodel::KeymapEntry>& keymap() const { return engine_.keymap(); }
+    bool keymapIsAuto() const { return engine_.explicitKeymap().empty(); }
+    // Point `note` at (slot, articulation); the note stops playing what it played before.
+    void assignNote(int note, int slot, const std::string& articulation);
+    void clearNote(int note);
+    void resetKeymap(); // back to the GM auto map
+
+    // Host MIDI in (any thread): the serial moves on every note-on.
+    uint32_t noteInSerial() const { return noteInSerial_.load(std::memory_order_acquire); }
+    int lastNoteIn() const { return lastNoteIn_.load(std::memory_order_relaxed); }
+    float lastVelocityIn() const { return lastVelocityIn_.load(std::memory_order_relaxed); }
+
     // --- audition (message thread -> audio thread) ---
     void audition(int slot, float velocity);
+    void auditionNote(int note, float velocity);
     int noteForSlot(int slot) const; // first keymap note playing `slot`, -1 = none
 
     bfdengine::Engine& engine() { return engine_; }
@@ -114,6 +130,7 @@ private:
     Snapshot snapshot() const;
     void restore(Snapshot s);
     void recordUndo(); // call before an edit, under modelLock_
+    void editKeymap(const std::function<void(std::vector<bfdmodel::KeymapEntry>&)>& fn);
 
     bfdengine::Engine engine_;
     juce::StringArray libraryRoots_;
@@ -137,6 +154,9 @@ private:
     // UI audition events: single producer (message thread), single consumer (audio thread)
     std::array<bfdengine::NoteEvent, 64> uiEvents_{};
     std::atomic<uint32_t> uiHead_{0}, uiTail_{0};
+    std::atomic<uint32_t> noteInSerial_{0};
+    std::atomic<int> lastNoteIn_{-1};
+    std::atomic<float> lastVelocityIn_{0.0f};
 
     std::array<float*, bfdengine::Engine::kNumOuts> outPtrs_{};
     std::vector<float> scratchL_, scratchR_;

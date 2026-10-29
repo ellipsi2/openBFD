@@ -7,6 +7,7 @@
 #include "PluginProcessor.h"
 #include "UI/Browser.h"
 #include "UI/CableLayer.h"
+#include "UI/KeymapPanel.h"
 #include "UI/KitStage.h"
 #include "UI/MixerPanel.h"
 #include "UI/Theme.h"
@@ -40,6 +41,8 @@ public:
     void syncNow();
     openbfd::ui::KitStage& stage() { return stage_; }
     openbfd::ui::MixerPanel& mixerPanel() { return mixer_; }
+    // The keymap takes the mixer's place while it is shown.
+    void showKeymap(bool show);
 
 private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
@@ -60,8 +63,9 @@ private:
     openbfd::ui::Browser browser_{*this};
     openbfd::ui::KitStage stage_{*this};
     openbfd::ui::MixerPanel mixer_{*this};
+    openbfd::ui::KeymapPanel keymap_{*this};
     openbfd::ui::CableLayer cables_;
-    juce::TextButton undo_{"UNDO"}, redo_{"REDO"}, open_{"OPEN"}, save_{"SAVE"}, theme_{"DARK"};
+    juce::TextButton undo_{"UNDO"}, redo_{"REDO"}, keys_{"KEYMAP"}, open_{"OPEN"}, save_{"SAVE"}, theme_{"DARK"};
     std::unique_ptr<juce::FileChooser> chooser_;
 
     juce::String hint_;
@@ -70,6 +74,7 @@ private:
     std::string hoverCable_; // plugged cable whose mic / jack / plug is under the mouse
     double hoverSince_ = 0.0;
     int flipBackToken_ = 0;
+    uint32_t noteInSerial_ = 0;
     int voices_ = 0, layersReady_ = 0, layersTotal_ = 0, layersDone_ = 0;
     bool cacheFull_ = false;
 

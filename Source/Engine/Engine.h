@@ -185,6 +185,8 @@ public:
     // Explicit keymap (e.g. a preset's BFD2MidiMap); an empty map selects the
     // automatic GM map built from the kit's piece kinds.
     void setKeymap(std::vector<bfdmodel::KeymapEntry> map);
+    // Both at once: one re-resolve instead of two.
+    void setKitAndKeymap(bfdmodel::Kit kit, std::vector<bfdmodel::KeymapEntry> map);
     const std::vector<bfdmodel::KeymapEntry>& keymap() const { return activeKeymap_; }
     const std::vector<bfdmodel::KeymapEntry>& explicitKeymap() const { return keymap_; }
     // Kit slot -> piece (nullptr = empty / not in any scanned library).
@@ -290,6 +292,10 @@ private:
 // Resolve a velocity-layer file, tolerating stale extensions in the metadata
 // (BFDArticTweaks.xml often still says "masterNN.wav" for ".bfdlac" files).
 std::string resolveLayerPath(const std::string& dir, const std::string& fileName);
+
+// The articulation a keymap name plays on `piece`: the named one, else the
+// piece's main stroke (names differ between piece classes).
+const bfdmodel::Articulation* resolveArticulation(const bfdmodel::Piece& piece, const std::string& wanted);
 
 // Velocity-layer selection helpers (shared with tests).
 const bfdmodel::VelLayer* pickLayer(const bfdmodel::Articulation& art, float velocity01);

@@ -1,9 +1,10 @@
 // ui_shot: render the openbfd editor to a PNG without a DAW.
-// Usage: openbfd-ui-shot <out.png> [light|dark] [kit-or-preset] [front|rear|cable|bare|select] [WxH]
+// Usage: openbfd-ui-shot <out.png> [light|dark] [kit-or-preset] [front|rear|cable|bare|select|keys] [WxH]
 //   Libraries come from BFD3's DataPaths.xml. "rear" turns the mixer around,
 //   "cable" photographs a cable in the hand on its way to a jack, "bare" the
 //   rear with the plugged cables hidden, "select" the first piece and the
-//   first patched channel selected. OPENBFD_SHOT_WAIT=<seconds> waits for
+//   first patched channel selected, "keys" the keymap with a custom note
+//   (snare rim shot also on 91). OPENBFD_SHOT_WAIT=<seconds> waits for
 //   the kit to finish loading.
 #include <JuceHeader.h>
 
@@ -17,7 +18,7 @@ void pump(int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms
 int main(int argc, char** argv) {
     juce::ScopedJuceInitialiser_GUI juceInit;
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <out.png> [light|dark] [kit] [front|rear|cable|bare|select] [WxH]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <out.png> [light|dark] [kit] [front|rear|cable|bare|select|keys] [WxH]\n", argv[0]);
         return 2;
     }
     const bool dark = argc > 2 && juce::String(argv[2]) == "dark";
@@ -51,6 +52,11 @@ int main(int argc, char** argv) {
             if (jack.valid()) strip = std::min(strip, jack.strip);
         if (strip < bfdengine::kNumStrips) ed->selectStrip(strip);
         pump(2500);
+    } else if (view == "keys") {
+        ed->showKeymap(true);
+        for (const auto& k : proc.keymap())
+            if (k.note == 40) proc.assignNote(91, k.slot, k.articulation);
+        pump(800);
     } else if (view == "rear" || view == "bare") {
         ed->mixerPanel().flipTo(true);
         pump(2500); // let the cables settle

@@ -485,6 +485,12 @@ void Engine::setKeymap(std::vector<bfdmodel::KeymapEntry> map) {
     rebuild();
 }
 
+void Engine::setKitAndKeymap(bfdmodel::Kit kit, std::vector<bfdmodel::KeymapEntry> map) {
+    kit_ = std::move(kit);
+    keymap_ = std::move(map);
+    rebuild();
+}
+
 void Engine::setMixer(MixerState mixer) {
     mixer_ = std::move(mixer);
     updateRouting();
@@ -569,17 +575,6 @@ std::string normalizeRef(std::string ref) {
     return ref;
 }
 
-const Articulation* resolveArticulation(const Piece& piece, const std::string& wanted) {
-    if (const Articulation* a = piece.findArticulation(wanted)) return a;
-    // Different piece classes use different articulation vocabularies
-    // (crash/ride: Bow/Edge/Bell, hats: ClosedT/OpenT/Pedal, ...).
-    static const char* kFallbacks[] = {"Hit",  "Bow",      "Edge",   "ClosedT", "ClosedS",
-                                       "Tip",  "Stick",    "Pedal",  "Bell",    "Center"};
-    for (const char* name : kFallbacks)
-        if (const Articulation* a = piece.findArticulation(name)) return a;
-    return piece.articulations.empty() ? nullptr : &piece.articulations.front();
-}
-
 // Preload order inside one articulation: loudest, softest, then bisection,
 // so the nearest-loaded fallback is never far from the requested layer.
 std::vector<int> spreadOrder(int n) {
@@ -600,6 +595,17 @@ std::vector<int> spreadOrder(int n) {
     return out;
 }
 } // namespace
+
+const Articulation* resolveArticulation(const Piece& piece, const std::string& wanted) {
+    if (const Articulation* a = piece.findArticulation(wanted)) return a;
+    // Different piece classes use different articulation vocabularies
+    // (crash/ride: Bow/Edge/Bell, hats: ClosedT/OpenT/Pedal, ...).
+    static const char* kFallbacks[] = {"Hit",  "Bow",      "Edge",   "ClosedT", "ClosedS",
+                                       "Tip",  "Stick",    "Pedal",  "Bell",    "Center"};
+    for (const char* name : kFallbacks)
+        if (const Articulation* a = piece.findArticulation(name)) return a;
+    return piece.articulations.empty() ? nullptr : &piece.articulations.front();
+}
 
 void Engine::rebuild() {
     auto rk = std::make_shared<ResolvedKit>();

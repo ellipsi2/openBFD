@@ -32,6 +32,11 @@ BFD3 콘텐츠 라이브러리를 읽어 연주하는 오픈소스 드럼 VI (JU
     다른 곳에 놓으면 케이블이 마이크로 감겨 들어간다.
   - 뒷면에서는 꽂힌 플러그를 다른 잭으로 옮길 수 있다.
   - `HIDE CABLES`로 케이블을 감추고, `REAR`로 뒷면을 고정한다.
+- **키맵** (`KEYMAP`, 믹서 자리): 킷의 모든 피스·타법과 거기 할당된 MIDI 노트.
+  - `LEARN`을 누르고 노트를 치면 할당되고, `+`로 목록에서 고른다. 노트 칩을 클릭하면 해제한다.
+  - 한 노트는 하나의 타법만 연주한다. 타법 이름을 클릭하면 들어 본다. `AUTO MAP`은 GM 자동 맵으로 되돌린다.
+  - 편집한 맵은 플러그인 상태에 저장된다. 킷을 바꾸면 같은 피스가 남은 슬롯은 노트를 유지하고,
+    새 피스는 비어 있는 GM 노트를 받는다.
 - 라이트 / 다크 테마
 
 ## 빌드
@@ -52,7 +57,7 @@ VST3는 `build/OpenBfd_artefacts/Release/VST3/openbfd.vst3`에 생성된다.
 | `openbfd-tests` | 단위 테스트. `OPENBFD_LIBRARY=<라이브러리 경로>`를 주면 실제 라이브러리 검증도 한다 |
 | `openbfd-decode` | `stats <file.bfdlac>` / `wav <file.bfdlac> <out.wav>` |
 | `openbfd-render` | 실제 프로세서로 킷을 WAV로 렌더 |
-| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare\|select] [WxH]`. `OPENBFD_SHOT_WAIT=<초>`를 주면 킷 로딩이 끝날 때까지 기다린다 |
+| `openbfd-ui-shot` | DAW 없이 에디터 스크린샷: `<out.png> [light\|dark] [킷] [front\|rear\|cable\|bare\|select\|keys] [WxH]`. `OPENBFD_SHOT_WAIT=<초>`를 주면 킷 로딩이 끝날 때까지 기다린다 |
 
 `tools/ref_bfdlac.py`는 파이썬 레퍼런스 디코더다.
 

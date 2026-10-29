@@ -46,6 +46,7 @@ set(OPENBFD_UI_SOURCES
     Source/Plugin/UI/Browser.cpp
     Source/Plugin/UI/KitStage.cpp
     Source/Plugin/UI/MixerPanel.cpp
+    Source/Plugin/UI/KeymapPanel.cpp
     Source/Plugin/UI/CableLayer.cpp)
 juce_add_binary_data(OpenBfdFonts
     HEADER_NAME OpenBfdFonts.h
