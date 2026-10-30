@@ -12,6 +12,15 @@ BFD3 콘텐츠 라이브러리를 읽어 연주하는 오픈소스 드럼 VI (JU
   모델링하지 않는 섹션은 그대로 보존한다.
 - **엔진**: 벨로시티 레이어, `Alt/` 라운드로빈, 백그라운드 프리로드, 디스크 스트리밍.
   오디오 스레드에서는 락·할당·파일 I/O를 하지 않는다.
+- **BFD3 연주 모델** (BFD3 동작을 분석해 옮김):
+  - dynamics / master dynamics 벨로시티 오프셋
+  - 3-엔벌로프 댐핑 (`dampAmt` `dampFreq` `dampRatio` `v2d`)
+  - 라우드니스 노멀라이즈와 커브, 다이내믹 레인지
+    (BFD3가 설치돼 있으면 `BFD3ArticLoudnessInfo.xml`을 쓴다)
+  - 안티 머신건: 같은 레이어 반복을 피하고, `AMGVarDepth`로 레벨을 흔든다
+  - 초크: 같은 피스와 초크 그룹, 클래스별 페이드 길이, `chokeFade_*`
+  - 하이햇 tightening (댐핑·피치)
+  - 탐 공명과 스필 (`tomRes_active` `resTrim` `spillTrim`)
 - **믹서**: 킷의 모든 마이크(direct, ambient, other bleed)를 32개 출력 채널의
   L/R 잭에 패치한다. L만 꽂으면 모노, L+R은 스테레오, Mid+Side는 M/S이다.
   채널 N은 출력 버스 `Ch N`과 Main으로 나간다.

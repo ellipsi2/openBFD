@@ -416,6 +416,7 @@ bool loadPiece(const std::string& pieceDir, Piece* out, std::string* error) {
     parseChannels(*info, out);
     for (const XmlElement* vs : info->childrenNamed("VString"))
         if (vs->attrOr("name") == "kpi_class") out->klass = vs->attrOr("string", vs->text);
+    out->beater = info->attrOr("kpi_beater");
     out->diameter = parseDiameter(out->dimensions);
 
     for (const XmlElement* arr : info->childrenNamed("VObjectArray")) {
@@ -618,7 +619,7 @@ bool parseKitState(const XmlElement* info, const XmlElement* kit, Kit* out, std:
             st.ambMasterGain = float(kp->attrNum("amb_master_gain", 0.8));
             st.ambMasterGainLink = kp->attrOr("amb_master_gain_link") == "true";
             st.micBlend = float(kp->attrNum("micBlend", 0.5));
-            st.chokeGroup = int(kp->attrNum("chokeGroup", 0));
+            st.chokeGroup = int(kp->attrNum("chokeGroup", KitPieceState::kChokeGroupSlot));
             st.stageX = float(kp->attrNum("ob_stageX", -1));
             st.stageY = float(kp->attrNum("ob_stageY", -1));
             for (const XmlElement* art : kp->childrenNamed("BFD2Artic")) {
@@ -690,7 +691,7 @@ std::string pieceStateXml(const KitPieceState& p, size_t index, bool withLayout 
       << "\" amb_master_gain=\"" << p.ambMasterGain << "\" amb_master_gain_link=\""
       << (p.ambMasterGainLink ? "true" : "false") << "\" mute=\"" << (p.mute ? "true" : "false")
       << "\" solo=\"" << (p.solo ? "true" : "false") << "\" micBlend=\"" << p.micBlend
-      << "\" chokeGroup=\"" << p.chokeGroup << "\"";
+      << "\" chokeGroup=\"" << chokeGroupOf(p, int(index)) << "\"";
     if (withLayout) o << " ob_stageX=\"" << p.stageX << "\" ob_stageY=\"" << p.stageY << "\"";
     o << ">\n";
     for (size_t j = 0; j < p.arts.size(); ++j) {
@@ -1027,6 +1028,62 @@ std::vector<std::string> discoverLibraryRoots() {
         if (std::find(out.begin(), out.end(), path) == out.end()) out.push_back(path);
     }
     return out;
+}
+
+namespace {
+std::string beaterKey(std::string b) {
+    b.erase(std::remove_if(b.begin(), b.end(), [](unsigned char c) { return std::isspace(c); }), b.end());
+    if (b.empty() || b == "Stick") b = "Stick,Wood";
+    return b;
+}
+bool sameText(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower((unsigned char)x) == std::tolower((unsigned char)y);
+           });
+}
+} // namespace
+
+std::vector<ArticLoudness> loadArticLoudness(const std::string& path) {
+    std::vector<ArticLoudness> out;
+    std::string xml;
+    std::vector<XmlElement> roots;
+    if (path.empty() || !readFile(path, &xml) || !parseXml(xml, &roots)) return out;
+    std::vector<const XmlElement*> infos;
+    for (const auto& r : roots) collectDeep(r, "BFDArticLoudnessInfo", &infos);
+    for (const XmlElement* e : infos)
+        out.push_back({e->attrOr("kpi_class"), beaterKey(e->attrOr("beater")), e->attrOr("artic"),
+                       float(e->attrNum("min", 0)), float(e->attrNum("max", 0))});
+    return out;
+}
+
+std::string findArticLoudnessFile() {
+    std::vector<std::string> candidates;
+    if (const char* env = std::getenv("OPENBFD_LOUDNESS_DB")) candidates.push_back(env);
+    candidates.push_back("/Library/Application Support/BFD Drums/BFD3/Resources/BFD3ArticLoudnessInfo.xml");
+    candidates.push_back("C:/Program Files/BFD Drums/BFD3/Resources/BFD3ArticLoudnessInfo.xml");
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (fs::is_regular_file(c, ec)) return c;
+    }
+    return {};
+}
+
+bool lookupArticLoudness(const std::vector<ArticLoudness>& table, const std::string& klass,
+                         const std::string& artic, const std::string& beater, float* min, float* max) {
+    const std::string want = beaterKey(beater);
+    const ArticLoudness* first = nullptr;
+    for (const auto& e : table) {
+        if (!sameText(e.klass, klass) || !sameText(e.artic, artic)) continue;
+        if (sameText(e.beater, want)) {
+            first = &e;
+            break;
+        }
+        if (!first) first = &e;
+    }
+    if (!first) return false;
+    *min = first->min;
+    *max = first->max;
+    return true;
 }
 
 std::vector<KitFileEntry> listKitFiles(const std::string& libraryRoot) {

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <numeric>
 
 namespace bfdengine {
@@ -30,6 +31,12 @@ struct ResolvedArtic {
     float trimDb = 0.0f;      // articulation trim + kit aTrim
     float v2p = 0.0f;         // bipolar velocity->pitch amount, -1..1
     float v2a = 0.0f;         // velocity->ambience amount, 0..1
+    float v2d = 0.5f;         // velocity->damping (0.5 = off)
+    float amgDepth = 1.0f;    // AMGVarDepth: scales the loudness variation
+    float loudMin = 0.0f, loudMax = 0.0f; // normalisation span in dB (0 = BFD's -80..-40)
+    bool hatClosed = false;   // closed hihat stroke: tightening applies
+    bool hatClosing = false;  // closed / pedal hihat: chokes the hats at any velocity
+    int articPos = 0;         // index in the piece's articulation order
     // round-robin: rrGroups.size() >= 1 (group 0 = primary). Each group has
     // its own layer list and its own slice of kit->layers.
     struct RrSpan {
@@ -62,6 +69,18 @@ struct ResolvedKit {
     // Round-robin cursor per articulation (audio thread only). Each trigger
     // advances it, so successive hits cycle through rrGroups[0..n).
     std::vector<uint32_t> rrCursor;
+    std::vector<int> lastLayer; // per articulation, audio thread: anti-machine-gun
+    // Tom resonance / spill (BFD3ResonanceManager): rendered by the loader
+    // thread when a piece of the kit models it.
+    struct Resonance {
+        std::vector<std::shared_ptr<const MonoSound>> tomRes; // per slot
+        std::shared_ptr<const MonoSound> kickSpill;
+        std::array<std::shared_ptr<const MonoSound>, 8> snareSpill; // per snare articulation
+    };
+    bool wantResonance = false;
+    bool resonanceBuilt = false;                 // loader thread only
+    std::shared_ptr<const Resonance> resonance;  // written before resonanceReady
+    std::atomic<bool> resonanceReady{false};
     // Streaming: LayerSlot gains a streamed variant when streaming is on.
 };
 
@@ -314,7 +333,7 @@ const VelLayer* pickLayer(const Articulation& art, float velocity01) {
     return i < 0 ? nullptr : &art.layers[size_t(i)];
 }
 
-float layerGainDb(const std::vector<VelLayer>& layers, int want, int idx, float velocity01, float dyn) {
+float layerGainDb(const std::vector<VelLayer>& layers, int want, int idx, float velocity01) {
     const int n = int(layers.size());
     if (want < 0 || want >= n || idx < 0 || idx >= n) return 0.0f;
     auto known = [](float db) { return db > -99.0f; }; // -100 = not measured
@@ -325,12 +344,50 @@ float layerGainDb(const std::vector<VelLayer>& layers, int want, int idx, float 
         const float t = std::clamp((velocity01 - w.velLo) / (w.velHi - w.velLo), 0.0f, 1.0f);
         target += t * (layers[size_t(want + 1)].loudness - w.loudness);
     }
-    float loudest = target;
-    for (const auto& l : layers)
-        if (known(l.loudness)) loudest = std::max(loudest, l.loudness);
-    const float k = std::clamp(dyn, 0.0f, 1.0f) * 2.0f;
-    target = loudest + (target - loudest) * k;
     return target - layers[size_t(idx)].loudness;
+}
+
+float loudnessShape(float v, float curve) {
+    if (v < 0.001f) return 0.0f;
+    if (v > 0.999f) return 1.0f;
+    if (curve < 0.001f) return v;
+    const float q = curve * curve;
+    const float root = std::sqrt(std::max(0.0f, (q - 1.0f) * v * v + (q * 0.0025f - 2.0f * q * v * 0.05f) + v));
+    return (2.0f * q * (0.0025f - v * 0.05f) + q * ((v * 4.0f - 2.0f) * 0.05f - 2.0f * v) * 0.95f +
+            2.0f * curve * 0.9f * root + v) /
+           (1.0f - 4.0f * q * 0.0475f);
+}
+
+float normalisedLoudnessDb(float minDb, float maxDb, float velocity01, float curve) {
+    // BFD3 falls back to -80..-40 dB when the articulation has no measured span.
+    if (minDb > -1.0f && maxDb > -1.0f) {
+        minDb = -80.0f;
+        maxDb = -40.0f;
+    }
+    if (minDb >= 0.0f) minDb = -90.0f;
+    if (maxDb >= 0.0f) maxDb = -1.0f;
+    return minDb + (maxDb - minDb) * loudnessShape(velocity01, curve);
+}
+
+std::array<double, 3> dampingDecay(float dampAmt, float dampRatio, float v2d, float velocity01, double sampleRate) {
+    std::array<double, 3> m{1.0, 1.0, 1.0};
+    if (dampAmt <= 0.0f || sampleRate <= 0.0) return m;
+    // v2d bends the damping with velocity: above 0.5 soft hits ring longer,
+    // below 0.5 hard hits do.
+    const double a = 2.0 * v2d - 1.0;
+    const double v = a >= 0.0 ? velocity01 : 1.0 - velocity01;
+    const double d = 1.0 - ((1.0 - std::abs(a)) + v * std::abs(a)) * dampAmt;
+    const double t = d * d * d * 9.9 + 0.1; // seconds
+    auto mul = [&](double sec) { return 1.0 - std::sin(M_PI * std::min(1.0 / (sec * sampleRate), 0.5)); };
+    m[0] = mul(t);
+    m[1] = mul(t * (2.0 * dampRatio + 1.0));
+    m[2] = mul(t * (8.0 * dampRatio + 1.0));
+    return m;
+}
+
+float chokeFadeSec(float base, float range, float oldVel, float newVel) {
+    const float k = newVel > 0.0f ? std::clamp(1.0f - oldVel / newVel, 0.0f, 1.0f) : 0.0f;
+    return std::max(0.0f, base + k * range);
 }
 
 // --- Voice ---------------------------------------------------------------
@@ -346,15 +403,51 @@ void Voice::start(const VoiceParams& params, uint64_t age) {
     releasing_ = false;
     env_ = 1.0f;
     releaseStep_ = 0.0f;
+    decayEnv_ = {1.0, 1.0, 1.0};
     age_ = age;
     chunkIndex_[0] = chunkIndex_[1] = -1;
     lpState_.fill(0.0f);
+    if (params.res) {
+        const size_t n = std::max(params.res->pcm.size(), params.spill ? params.spill->pcm.size() : size_t(0));
+        active_ = n > 1 && params.resTarget >= 0;
+    }
 }
 
 void Voice::stop(float releaseSec, double sampleRate) {
-    if (!active_ || releasing_) return;
+    if (!active_) return;
+    const float step = env_ / std::max(1.0f, releaseSec * float(sampleRate));
+    releaseStep_ = releasing_ ? std::max(releaseStep_, step) : step;
     releasing_ = true;
-    releaseStep_ = 1.0f / std::max(1.0f, releaseSec * float(sampleRate));
+}
+
+void Voice::renderResonance(float* const* jacks, int from, int n) {
+    const MonoSound& r = *params_.res;
+    const MonoSound* sp = params_.spill.get();
+    const double frames = double(std::max(r.pcm.size(), sp ? sp->pcm.size() : size_t(0)));
+    float* out = jacks[params_.resTarget];
+    auto at = [](const std::vector<float>& pcm, int i0, float frac) {
+        if (i0 + 1 >= int(pcm.size())) return 0.0f;
+        return pcm[size_t(i0)] + (pcm[size_t(i0 + 1)] - pcm[size_t(i0)]) * frac;
+    };
+    for (int i = from; i < from + n; ++i) {
+        if (pos_ >= frames - 1.0) {
+            active_ = false;
+            break;
+        }
+        const int i0 = int(pos_);
+        const float frac = float(pos_ - i0);
+        float v = at(r.pcm, i0, frac) * params_.resGain;
+        if (sp) v += at(sp->pcm, i0, frac) * params_.spillGain;
+        out[i] += v * params_.gain * env_;
+        pos_ += params_.rate;
+        if (releasing_) {
+            env_ -= releaseStep_;
+            if (env_ <= 0.0f) {
+                active_ = false;
+                break;
+            }
+        }
+    }
 }
 
 const float* Voice::frameData(int frameIndex, int32_t* scratch) {
@@ -381,7 +474,12 @@ const float* Voice::frameData(int frameIndex, int32_t* scratch) {
 }
 
 void Voice::render(float* const* jacks, int from, int n, int32_t* scratch, const SlotRouting* live) {
-    if (!active_ || !params_.sample) return;
+    if (!active_) return;
+    if (params_.res) {
+        renderResonance(jacks, from, n);
+        return;
+    }
+    if (!params_.sample) return;
     const SampleData& s = *params_.sample;
     const int ch = s.channels;
     const int frames = s.frames;
@@ -393,8 +491,9 @@ void Voice::render(float* const* jacks, int from, int n, int32_t* scratch, const
     const ChannelRoute* routes = useLive ? live->routes.data() : params_.routes.data();
     const int routeCount = std::min(useLive ? live->routeCount : params_.routeCount, ch);
     const float lpA = params_.lpCoeff;
-    const float wet = params_.dampMix;
     const float amb = params_.ambScale;
+    const auto& m = params_.decay;
+    const bool decaying = m[0] < 1.0 || m[1] < 1.0 || m[2] < 1.0;
 
     for (int i = from; i < from + n; ++i) {
         if (pos_ >= double(frames - 1)) {
@@ -408,16 +507,32 @@ void Voice::render(float* const* jacks, int from, int n, int32_t* scratch, const
         const float* a = frameData(k, scratch) + size_t(off) * ch;
         const float* b = off + 1 < bs ? a + ch : frameData(k + 1, scratch); // other buffer slot
         const float g = params_.gain * env_;
+        const float e1 = float(decayEnv_[0]), e2 = float(decayEnv_[1]), e3 = float(decayEnv_[2]);
         for (int c = 0; c < routeCount; ++c) {
             const ChannelRoute& r = routes[c];
             if (r.target < 0) continue;
             float v = a[c] + (b[c] - a[c]) * frac;
-            if (wet > 0.0f) {
+            // BFD2SynthVoice::SynthesizeChannel: ambient mics decay with the
+            // first envelope; direct mics split at the damping frequency,
+            // the lows on the second envelope and the highs on the third.
+            if (r.ambient) {
+                v *= e1 * amb;
+            } else if (lpA > 0.0f) {
                 float& st = lpState_[size_t(c)];
-                st += lpA * (v - st);
-                v += wet * (st - v);
+                const float hi = v - st;
+                st += lpA * hi;
+                v = e3 * hi + e2 * st;
+            } else {
+                v *= e2;
             }
-            jacks[r.target][i] += v * g * r.gain * (r.ambient ? amb : 1.0f);
+            jacks[r.target][i] += v * g * r.gain;
+        }
+        if (decaying) {
+            for (int k = 0; k < 3; ++k) decayEnv_[size_t(k)] *= m[size_t(k)];
+            if (std::max({decayEnv_[0], decayEnv_[1], decayEnv_[2]}) < 1e-5) {
+                active_ = false;
+                break;
+            }
         }
         pos_ += rate;
         if (releasing_) {
@@ -438,6 +553,7 @@ Engine::Engine() {
     jackStorage_.assign(size_t(kNumStrips) * 2 * kChunk, 0.0f);
     for (size_t j = 0; j < jacks_.size(); ++j) jacks_[j] = jackStorage_.data() + j * kChunk;
     for (auto& v : voices_) v.allocate();
+    loudness_ = bfdmodel::loadArticLoudness(bfdmodel::findArticLoudnessFile());
     loader_ = std::thread([this] { loaderMain(); });
 }
 
@@ -465,7 +581,7 @@ bool sameStructure(const bfdmodel::Kit& a, const bfdmodel::Kit& b) {
             const auto& x = pa.arts[j];
             const auto& y = pb.arts[j];
             if (x.articName != y.articName || x.v2p != y.v2p || x.v2a != y.v2a || x.aTrim != y.aTrim ||
-                x.v2d != y.v2d)
+                x.v2d != y.v2d || x.amgVarDepth != y.amgVarDepth)
                 return false;
         }
     }
@@ -519,15 +635,28 @@ void Engine::updateRouting() {
         SlotRouting& sr = r->slots[i];
         const KitPieceState& st = kit_.pieces[i];
         sr.piece = pieces[i];
+        if (sr.piece) sr.kind = bfdmodel::pieceKind(*sr.piece);
         sr.trim = st.trim;
         sr.tune = st.tune;
         sr.dyn = st.dyn;
         sr.dampAmt = st.dampAmt;
         sr.dampFreq = st.dampFreq;
+        sr.dampRatio = st.dampRatio;
+        sr.loudnessNorm = st.loudnessNorm;
+        sr.loudnessCurve = st.loudnessCurve;
+        sr.loudnessDynRange = st.loudnessDynRange;
+        sr.chokeGroup = bfdmodel::chokeGroupOf(st, int(i));
+        sr.model = st.model;
         sr.mute = st.mute;
         const auto routes = buildRoutes(kit_, int(i), pieces, mixer_);
         sr.routeCount = int(std::min<size_t>(routes.size(), kMaxChannels));
         std::copy_n(routes.begin(), sr.routeCount, sr.routes.begin());
+        if (sr.piece)
+            for (int c = 0; c < sr.routeCount; ++c)
+                if (bfdmodel::isOwnChannel(sr.kind, sr.piece->channels[size_t(c)])) {
+                    sr.directRoute = c;
+                    break;
+                }
     }
     const auto mics = listMics(kit_, pieces);
     for (int s = 0; s < kNumStrips; ++s) {
@@ -536,6 +665,7 @@ void Engine::updateRouting() {
         r->anySolo = r->anySolo || (mixer_.strips[size_t(s)].solo && r->modes[size_t(s)] != StripMode::Empty);
     }
     r->masterGain = mixer_.masterGain;
+    r->masterDynamics = kit_.masterDynamics;
 
     std::shared_ptr<Routing> garbage, oldPending;
     std::lock_guard<std::mutex> lock(swapMutex_);
@@ -656,7 +786,18 @@ void Engine::rebuild() {
                 ra.trimDb += (a.aTrim - 0.5f) * 24.0f;
                 ra.v2p = std::clamp((a.v2p - 0.5f) * 2.0f, -1.0f, 1.0f); // 0.5 = off
                 ra.v2a = std::clamp(a.v2a, 0.0f, 1.0f);
+                ra.v2d = std::clamp(a.v2d, 0.0f, 1.0f);
+                ra.amgDepth = std::max(0.0f, a.amgVarDepth);
             }
+            bfdmodel::lookupArticLoudness(loudness_, rs.piece->klass, art->name, rs.piece->beater, &ra.loudMin,
+                                          &ra.loudMax);
+            if (bfdmodel::pieceKind(*rs.piece) == bfdmodel::PieceKind::Hihat) {
+                ra.hatClosed = art->name.rfind("Closed", 0) == 0;
+                ra.hatClosing = ra.hatClosed || art->name.rfind("Pedal", 0) == 0;
+            }
+            const auto& order = rs.piece->articOrder;
+            ra.articPos = int(std::find(order.begin(), order.end(), art->name) - order.begin());
+            if (ra.articPos >= int(order.size())) ra.articPos = 0;
             // Resolve round-robin groups: group 0 is always the primary layer
             // list; further groups are the Alt/ (or named rrGroups) sets.
             if (art->rrGroups.empty()) {
@@ -703,6 +844,18 @@ void Engine::rebuild() {
     rk->layerCount = total;
     rk->layers = std::make_unique<LayerSlot[]>(size_t(std::max(1, total)));
     rk->rrCursor.assign(rk->artics.size(), 0);
+    rk->lastLayer.assign(rk->artics.size(), -1);
+    {
+        bool tom = false, model = false;
+        for (const auto& rs : rk->slots) {
+            if (!rs.piece) continue;
+            const auto kind = bfdmodel::pieceKind(*rs.piece);
+            tom = tom || kind == bfdmodel::PieceKind::Tom || kind == bfdmodel::PieceKind::FloorTom;
+            model = model || (rs.state.model.tomResActive &&
+                              (kind == bfdmodel::PieceKind::Kick || kind == bfdmodel::PieceKind::Snare));
+        }
+        rk->wantResonance = tom && model;
+    }
     int readyNow = 0;
     for (const auto& ra : rk->artics) {
         for (const auto& sp : ra.rrGroups) {
@@ -792,7 +945,9 @@ bool Engine::waitUntilLoaded(int timeoutMs) const {
     for (;;) {
         {
             std::lock_guard<std::mutex> lock(loaderMutex_);
-            if (!loaderKit_ || loaderKit_->done.load() >= loaderKit_->layerCount) return true;
+            if (!loaderKit_) return true;
+            const bool models = !loaderKit_->wantResonance || loaderKit_->resonanceReady.load();
+            if (loaderKit_->done.load() >= loaderKit_->layerCount && models) return true;
         }
         // Preload pauses at the cache budget; the rest loads on demand.
         if (cache_.bytesUsed() >= cache_.budget()) return true;
@@ -800,6 +955,140 @@ bool Engine::waitUntilLoaded(int timeoutMs) const {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
+
+// --- tom resonance / spill models -------------------------------------------
+// BFD3ModelTomResonance / BFD3ModelTomSpill: the sound a kick or snare hit
+// makes in a tom's mic, built from the kit's own samples. The resonance is
+// the tom's ringing tail (its Direct mic from 0.5 s on, faded in over 0.1 s,
+// lowpassed at 350 Hz); the spill is the kick's room mic (band-passed at
+// 400 Hz) or the snare's overheads and snare mics (500 Hz).
+
+namespace {
+
+// Two cascaded RBJ biquads (VFilterBiquad4): mode 0 lowpass, 2 bandpass.
+void filter4(std::vector<float>& x, double freq, int mode, double sampleRate) {
+    const double w = 2.0 * M_PI * std::clamp(freq / sampleRate, 1e-4, 0.48);
+    const double alpha = std::sin(w) / (2.0 * M_SQRT1_2);
+    const double c = std::cos(w);
+    double b0, b1, b2;
+    if (mode == 0) {
+        b0 = (1.0 - c) / 2.0;
+        b1 = 1.0 - c;
+        b2 = b0;
+    } else {
+        b0 = alpha;
+        b1 = 0.0;
+        b2 = -alpha;
+    }
+    const double a0 = 1.0 + alpha, a1 = -2.0 * c, a2 = 1.0 - alpha;
+    for (int pass = 0; pass < 2; ++pass) {
+        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (float& v : x) {
+            const double y = (b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+            x2 = x1;
+            x1 = v;
+            y2 = y1;
+            y1 = y;
+            v = float(y);
+        }
+    }
+}
+
+// Mono mix of the channels of `piece` that match `pick`, from the layer
+// BFD uses for these models: articulation `articPos`, velocity 0.75.
+std::shared_ptr<MonoSound> extractMono(const Piece& piece, int articPos,
+                                       const std::function<bool(const ChanInfo&)>& pick) {
+    const Articulation* art = nullptr;
+    if (articPos >= 0 && size_t(articPos) < piece.articOrder.size())
+        art = piece.findArticulation(piece.articOrder[size_t(articPos)]);
+    if (!art) art = resolveArticulation(piece, "Hit");
+    if (!art) return nullptr;
+    const VelLayer* layer = pickLayer(*art, 0.75f);
+    if (!layer) return nullptr;
+    std::vector<int> chans;
+    for (const auto& ch : piece.channels) {
+        if (!pick(ch)) continue;
+        chans.push_back(ch.chanIndex);
+        if (ch.encoding == "stereoLeft") // and its right side
+            for (const auto& o : piece.channels)
+                if (o.encoding == "stereoRight" && o.group() == ch.group() && o.micIndex == ch.micIndex + 1)
+                    chans.push_back(o.chanIndex);
+        break;
+    }
+    if (chans.empty()) return nullptr;
+    bfdlac::File file;
+    if (!file.open(resolveLayerPath(art->directory, layer->fileName))) return nullptr;
+    const bfdlac::Header& h = file.header();
+    auto out = std::make_shared<MonoSound>();
+    out->sampleRate = h.sampleRate > 0 ? h.sampleRate : 44100;
+    out->pcm.assign(size_t(std::max(0, h.frames)), 0.0f);
+    std::vector<float> block(size_t(h.blockSize) * size_t(h.channels));
+    for (int start = 0; start < h.frames; start += h.blockSize) {
+        const int count = std::min(h.blockSize, h.frames - start);
+        file.readFloat(start, count, block.data());
+        for (int i = 0; i < count; ++i)
+            for (int c : chans)
+                if (c >= 0 && c < h.channels) out->pcm[size_t(start + i)] += block[size_t(i * h.channels + c)];
+    }
+    return out;
+}
+
+std::shared_ptr<const ResolvedKit::Resonance> buildResonance(const ResolvedKit& kit) {
+    using bfdmodel::PieceKind;
+    auto res = std::make_shared<ResolvedKit::Resonance>();
+    res->tomRes.resize(kit.slots.size());
+    const Piece* kick = nullptr;
+    const Piece* snare = nullptr;
+    for (size_t s = 0; s < kit.slots.size(); ++s) {
+        const Piece* p = kit.slots[s].piece.get();
+        if (!p) continue;
+        const PieceKind kind = bfdmodel::pieceKind(*p);
+        if (kind == PieceKind::Kick && !kick) kick = p;
+        if (kind == PieceKind::Snare && !snare) snare = p;
+        if (kind != PieceKind::Tom && kind != PieceKind::FloorTom) continue;
+        auto tail = extractMono(*p, 0, [&](const ChanInfo& ch) { return bfdmodel::isOwnChannel(kind, ch); });
+        if (!tail) continue;
+        const int sr = tail->sampleRate;
+        const int from = sr / 2, to = int(tail->pcm.size()) - sr / 2;
+        if (to - from < sr / 10) continue;
+        tail->pcm = std::vector<float>(tail->pcm.begin() + from, tail->pcm.begin() + to);
+        const int fade = sr / 10;
+        for (int i = 0; i < fade; ++i) tail->pcm[size_t(i)] *= float(i) / float(fade);
+        filter4(tail->pcm, 350.0, 0, sr);
+        res->tomRes[s] = std::move(tail);
+    }
+    auto prefixed = [](const std::string& name, const char* prefix) { return name.rfind(prefix, 0) == 0; };
+    if (kick) {
+        auto room = extractMono(*kick, 0, [&](const ChanInfo& ch) { return ch.isAmbient() && prefixed(ch.name, "Room"); });
+        if (!room)
+            room = extractMono(*kick, 0, [&](const ChanInfo& ch) { return ch.isAmbient() && prefixed(ch.name, "Mono"); });
+        if (room) {
+            filter4(room->pcm, 400.0, 2, room->sampleRate);
+            res->kickSpill = std::move(room);
+        }
+    }
+    if (snare) {
+        for (int a = 0; a < 8 && size_t(a) < std::max<size_t>(1, snare->articOrder.size()); ++a) {
+            std::shared_ptr<MonoSound> mix;
+            for (auto pick : std::vector<std::function<bool(const ChanInfo&)>>{
+                     [&](const ChanInfo& ch) { return ch.isAmbient() && (prefixed(ch.name, "OH") || prefixed(ch.name, "Overhead")); },
+                     [&](const ChanInfo& ch) { return ch.type == "dirSnare" && prefixed(ch.name, "Snare Top"); },
+                     [&](const ChanInfo& ch) { return ch.type == "dirSnare" && prefixed(ch.name, "Snare Bot"); }}) {
+                auto part = extractMono(*snare, a, pick);
+                if (!part) continue;
+                if (!mix) mix = std::move(part);
+                else
+                    for (size_t i = 0; i < std::min(mix->pcm.size(), part->pcm.size()); ++i) mix->pcm[i] += part->pcm[i];
+            }
+            if (!mix) continue;
+            filter4(mix->pcm, 500.0, 2, mix->sampleRate);
+            res->snareSpill[size_t(a)] = std::move(mix);
+        }
+    }
+    return res;
+}
+
+} // namespace
 
 void Engine::loaderMain() {
     while (!quit_.load()) {
@@ -835,6 +1124,12 @@ void Engine::loaderMain() {
                     if (!s.failed && !s.ready.load(std::memory_order_acquire)) pick = i;
                 }
             }
+        }
+        if (pick < 0 && k && k->wantResonance && !k->resonanceBuilt) {
+            k->resonanceBuilt = true;
+            k->resonance = buildResonance(*k);
+            k->resonanceReady.store(true, std::memory_order_release);
+            continue;
         }
         if (pick < 0) {
             std::unique_lock<std::mutex> lock(loaderMutex_);
@@ -897,7 +1192,9 @@ void Engine::trigger(ResolvedKit& kit, const Routing& routing, const NoteEvent& 
     const SlotRouting* sr = size_t(t.slot) < routing.slots.size() ? &routing.slots[size_t(t.slot)] : nullptr;
     if (!sr || sr->mute || sr->piece != rs.piece.get()) return;
     const ResolvedArtic& ra = kit.artics[size_t(t.artic)];
-    const float velocity = std::clamp(ev.velocity, 0.0f, 1.0f);
+    // BFD2::StartVoice: the piece's and the kit's dynamics shift the velocity
+    // before anything else looks at it.
+    const float velocity = dynamicVelocity(std::clamp(ev.velocity, 0.0f, 1.0f), sr->dyn, routing.masterDynamics);
 
     // Round-robin: cycle through the articulation's RR groups on every hit.
     // Group 0 is the primary set; further groups are the Alt/ sets. The
@@ -943,6 +1240,18 @@ void Engine::trigger(ResolvedKit& kit, const Routing& routing, const NoteEvent& 
         }
     }
     if (idx < 0) return;
+    // Anti-machine-gun (BFD3's AM mode): never the same file twice in a row.
+    // Without round-robin sets, a repeat of the last layer plays a neighbour,
+    // level-matched like a stand-in.
+    int& last = kit.lastLayer[size_t(t.artic)];
+    if (nGroups <= 1 && idx == last && groupCount > 1) {
+        for (int alt : {idx + ((cursor & 1) ? 1 : -1), idx + ((cursor & 1) ? -1 : 1)})
+            if (alt >= 0 && alt < groupCount && kit.layers[size_t(groupFirst + alt)].ready.load(std::memory_order_acquire)) {
+                idx = alt;
+                break;
+            }
+    }
+    last = idx;
     const LayerSlot& chosen = kit.layers[size_t(groupFirst + idx)];
     const VelLayer& layer = (*layers)[size_t(idx)];
     const auto& sample = chosen.sample;
@@ -961,56 +1270,187 @@ void Engine::trigger(ResolvedKit& kit, const Routing& routing, const NoteEvent& 
     vp.piece = sr->piece;
     vp.slot = t.slot;
     vp.rrGroup = rrGroup;
+    vp.velocity = velocity;
     vp.routes = sr->routes;
     vp.routeCount = sr->routeCount;
 
-    // Level: the samples as recorded (see layerGainDb), plus the trims.
-    float gainDb = layerGainDb(*layers, want, idx, velocity, sr->dyn);
+    // Level (BFD2SynthVoice::ComputeLoudnessTweak). Normalised pieces play at
+    // a loudness mapped from velocity onto the articulation's measured span,
+    // widened or narrowed by the dynamic range knob; otherwise the samples
+    // play as recorded (see layerGainDb).
+    float gainDb = 0.0f;
+    if (sr->loudnessNorm && layer.loudness > -99.0f) {
+        gainDb = normalisedLoudnessDb(ra.loudMin, ra.loudMax, velocity, sr->loudnessCurve) - layer.loudness;
+        gainDb += (2.0f * velocity - 1.0f) * (2.0f * sr->loudnessDynRange - 1.0f) * 12.0f;
+    } else {
+        gainDb = layerGainDb(*layers, want, idx, velocity);
+    }
+    // AM mode loudness variation: master amount 0.25 x AMGVarDepth x up to
+    // +-6 dB, from the mean of four uniform draws (BFD's own LCG).
+    if (ra.amgDepth > 0.0f) {
+        float sum = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            amgSeed_ = amgSeed_ * 0xbb38433u + 0x3619636bu;
+            uint32_t bits = (amgSeed_ >> 9) | 0x40000000u; // [2, 4)
+            float f;
+            std::memcpy(&f, &bits, sizeof f);
+            sum += f - 3.0f;
+        }
+        gainDb += 0.25f * ra.amgDepth * (sum * 0.25f) * 2.0f * 3.0f;
+    }
     gainDb += layer.dbTrim + ra.trimDb;
     gainDb += (sr->trim - 0.8f) * 12.0f; // kit trim knob (0.8 = unity)
     vp.gain = std::pow(10.0f, gainDb / 20.0f);
 
-    // tune knob (0.5 = centre, +-1 semitone) and bipolar velocity->pitch
-    const float semis = (sr->tune - 0.5f) * 2.0f + (velocity - 0.5f) * ra.v2p * 2.0f;
-    vp.rate = float(std::pow(2.0, semis / 12.0) * double(sample->sampleRate) / std::max(1.0, sr44));
+    // Hihat tightening (closed strokes, pedal down): shorter decay and a
+    // slight pitch rise.
+    const bool tighten = ra.hatClosed && sr->kind == bfdmodel::PieceKind::Hihat;
 
+    // Pitch (InitVoiceWithNoteVelocityDelta): tune spans +-1 octave and v2p
+    // adds up to +-1 octave at full velocity.
+    float f = sr->tune + ra.v2p * velocity * 0.5f;
+    if (tighten) f += sr->model.hihatTightenPitch / 6.0f;
+    vp.rate = float(std::exp2(2.0 * f - 1.0) * double(sample->sampleRate) / std::max(1.0, sr44));
+
+    vp.decay = dampingDecay(sr->dampAmt, sr->dampRatio, ra.v2d, velocity, sr44);
     if (sr->dampAmt > 0.0f) {
-        const float f = std::clamp(sr->dampFreq, 20.0f, 18000.0f);
-        vp.lpCoeff = std::clamp(1.0f - std::exp(-2.0f * float(M_PI) * f / float(sr44)), 0.0f, 1.0f);
-        vp.dampMix = std::clamp(sr->dampAmt, 0.0f, 1.0f);
+        const double fc = std::clamp(double(sr->dampFreq), 20.0, sr44 * 0.45);
+        vp.lpCoeff = float(2.0 * std::sin(M_PI * fc / sr44));
+    }
+    if (tighten) {
+        const double closed = std::clamp(double(sr->model.hihatTightenDamp), 0.0, 1.0);
+        const double k = 44100.0 / std::max(1.0, sr44); // BFD's per-sample step at 44.1 kHz
+        vp.decay[0] = std::max(0.0, vp.decay[0] - closed * 0.0008 * k);
+        vp.decay[1] = std::max(0.0, vp.decay[1] - closed * 0.0004 * k);
     }
 
     // v2a: velocity scales the ambience share
     vp.ambScale = 1.0f - ra.v2a * (1.0f - velocity) * 0.7f;
+
+    choke(routing, *sr, t.slot, ra.hatClosing, velocity);
 
     // Per-piece polyphony: fast repeats fade the oldest ring-out instead of
     // piling up (and instead of hard-stealing unrelated voices later).
     int same = 0;
     Voice* oldestSame = nullptr;
     for (auto& v : voices_) {
-        if (!v.active() || v.releasing() || v.slot() != t.slot) continue;
+        if (!v.active() || v.releasing() || v.resonance() || v.slot() != t.slot) continue;
         ++same;
         if (!oldestSame || v.age() < oldestSame->age()) oldestSame = &v;
     }
     if (same >= kMaxVoicesPerSlot && oldestSame) oldestSame->stop(0.03f, sr44);
 
-    Voice* target = nullptr;
-    for (auto& v : voices_)
-        if (!v.active()) {
-            target = &v;
-            break;
-        }
-    if (!target) // reuse the oldest fading voice, then the oldest voice overall
-        for (auto& v : voices_)
-            if (v.releasing() && (!target || v.age() < target->age())) target = &v;
-    if (!target)
-        for (auto& v : voices_)
-            if (!target || v.age() < target->age()) target = &v;
-    target->start(vp, ++voiceAge_);
+    freeVoice().start(vp, ++voiceAge_);
     ++rr_;
+    if (sr->model.tomResActive && (sr->kind == bfdmodel::PieceKind::Kick || sr->kind == bfdmodel::PieceKind::Snare))
+        startResonance(kit, routing, *sr, t.slot, ra.articPos, velocity);
     if (t.slot < bfdmodel::Kit::kMaxSlots) {
         auto& hit = slotHits_[size_t(t.slot)];
         if (velocity > hit.load(std::memory_order_relaxed)) hit.store(std::max(velocity, 0.05f), std::memory_order_relaxed);
+    }
+}
+
+Voice& Engine::freeVoice() {
+    Voice* target = nullptr;
+    for (auto& v : voices_)
+        if (!v.active()) return v;
+    // reuse the oldest fading voice, then the oldest voice overall
+    for (auto& v : voices_)
+        if (v.releasing() && (!target || v.age() < target->age())) target = &v;
+    if (!target)
+        for (auto& v : voices_)
+            if (!target || v.age() < target->age()) target = &v;
+    return *target;
+}
+
+namespace {
+// Choke fade times in seconds, BFD3's per-class defaults (base, range).
+std::pair<float, float> chokeFadeDefaults(bfdmodel::PieceKind kind, bool closingHat) {
+    using bfdmodel::PieceKind;
+    switch (kind) {
+        case PieceKind::Hihat: return closingHat ? std::make_pair(0.05f, 0.05f) : std::make_pair(0.5f, 0.5f);
+        case PieceKind::Tom:
+        case PieceKind::FloorTom: return {1.0f, 2.0f};
+        case PieceKind::Crash:
+        case PieceKind::Ride:
+        case PieceKind::Splash:
+        case PieceKind::China: return {1.0f, 3.0f};
+        default: return {0.2f, 0.4f};
+    }
+}
+} // namespace
+
+// BFD2Synth::CheckForAndApplyMutualAutoChokeFades. A hit fades out what the
+// same piece still rings with at a lower velocity (a closing hihat stroke:
+// at any velocity), and everything playing on the other pieces of its choke
+// group. The fade is linear over base + (1 - old/new velocity) * range.
+void Engine::choke(const Routing& routing, const SlotRouting& hit, int slot, bool closing, float velocity) {
+    const double sr44 = sampleRate_.load();
+    for (auto& v : voices_) {
+        if (!v.active() || v.resonance()) continue;
+        const int vs = v.slot();
+        if (vs < 0 || size_t(vs) >= routing.slots.size()) continue;
+        const SlotRouting& target = routing.slots[size_t(vs)];
+        const bool self = vs == slot && v.piece() == hit.piece;
+        if (self) {
+            if (!closing && v.velocity() >= velocity) continue;
+        } else if (hit.chokeGroup < 0 || target.piece != v.piece() ||
+                   (target.chokeGroup != hit.chokeGroup && target.chokeGroup <= 63)) {
+            continue;
+        }
+        auto [base, range] = chokeFadeDefaults(target.kind, self && closing);
+        if (target.model.chokeFadeActive) {
+            base = target.model.chokeFadeBase;
+            range = target.model.chokeFadeRange;
+        }
+        v.stop(std::max(1.0f / float(sr44), chokeFadeSec(base, range, v.velocity(), velocity)), sr44);
+    }
+}
+
+// BFD2::StartResonanceSimNotes: a kick or snare hit on a piece with the tom
+// resonance model also plays every tom's resonance + spill sound into that
+// tom's direct mic, at (1 - velocity) * -24 dB, trimmed by the tom's resTrim
+// and spillTrim (+-24 dB).
+void Engine::startResonance(const ResolvedKit& kit, const Routing& routing, const SlotRouting& hit, int slot,
+                            int articPos, float velocity) {
+    if (!kit.resonanceReady.load(std::memory_order_acquire) || !kit.resonance) return;
+    const ResolvedKit::Resonance& bank = *kit.resonance;
+    const bool fromKick = hit.kind == bfdmodel::PieceKind::Kick;
+    const auto& spill = fromKick ? bank.kickSpill : bank.snareSpill[size_t(std::clamp(articPos, 0, 7))];
+    // BFD3ResonanceManager: kick spill +12 dB, snare spill -12 dB; the snare
+    // resonance is weighted per snare articulation.
+    const float spillDb = fromKick ? 12.0f : -12.0f;
+    const float resWeight = fromKick ? 1.0f : articPos == 1 ? 0.8f : articPos == 4 ? 0.3f : 1.0f;
+    auto trimGain = [](float x) { return std::pow(10.0f, (std::clamp(x, 0.0f, 1.0f) * 48.0f - 24.0f) / 20.0f); };
+    const double sr44 = sampleRate_.load();
+    for (size_t s = 0; s < bank.tomRes.size() && s < routing.slots.size(); ++s) {
+        if (int(s) == slot || !bank.tomRes[s]) continue;
+        const SlotRouting& tom = routing.slots[s];
+        if (tom.mute || !tom.piece || tom.piece != kit.slots[s].piece.get() || tom.directRoute < 0) continue;
+        const ChannelRoute& route = tom.routes[size_t(tom.directRoute)];
+        if (route.target < 0) continue;
+        VoiceParams vp;
+        vp.piece = tom.piece;
+        vp.slot = int(s);
+        vp.velocity = velocity;
+        vp.res = bank.tomRes[s];
+        vp.spill = spill;
+        vp.resTarget = route.target;
+        vp.resGain = resWeight * trimGain(tom.model.resTrim);
+        vp.spillGain = spill ? std::pow(10.0f, spillDb / 20.0f) * trimGain(tom.model.spillTrim) : 0.0f;
+        const float db = (1.0f - velocity) * -24.0f + (tom.trim - 0.8f) * 12.0f;
+        vp.gain = std::pow(10.0f, db / 20.0f) * route.gain;
+        vp.rate = float(double(vp.res->sampleRate) / std::max(1.0, sr44));
+        // Fast kick patterns would pile up long tails: keep two per tom.
+        Voice* oldest = nullptr;
+        int ringing = 0;
+        for (auto& v : voices_) {
+            if (!v.active() || v.releasing() || !v.resonance() || v.slot() != int(s)) continue;
+            ++ringing;
+            if (!oldest || v.age() < oldest->age()) oldest = &v;
+        }
+        if (ringing >= 2 && oldest) oldest->stop(0.05f, sr44);
+        freeVoice().start(vp, ++voiceAge_);
     }
 }
 

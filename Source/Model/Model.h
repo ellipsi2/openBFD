@@ -90,6 +90,7 @@ struct Piece {
     std::string library;       // info_library SKU
     std::string libraryLong;
     std::string klass;         // kpi_class: "Kick", "Snare", ...
+    std::string beater;        // kpi_beater: "Stick, Wood", "Brush", ...
     std::vector<ChanInfo> channels; // sorted by chanIndex
     std::vector<Articulation> articulations;
 
@@ -186,7 +187,10 @@ struct KitPieceState {
     float ambMasterGain = 0.8f;
     bool ambMasterGainLink = false;
     float micBlend = 0.5f;
-    int chokeGroup = 0;
+    // -1 = chokes only itself, 0..63 = pieces with the same group choke each
+    // other. BFD's default is the piece's own slot (kChokeGroupSlot here).
+    static constexpr int kChokeGroupSlot = -2;
+    int chokeGroup = kChokeGroupSlot;
     std::vector<AmbSend> ambSends;
     PieceModel model;
     std::vector<KitArticState> arts;
@@ -242,6 +246,31 @@ struct Preset {
 
 bool loadPreset(const std::string& path, Preset* out, std::string* error = nullptr);
 bool savePreset(const std::string& path, const Preset& preset, std::string* error = nullptr);
+
+// The choke group a piece in `slot` belongs to (resolves kChokeGroupSlot).
+inline int chokeGroupOf(const KitPieceState& st, int slot) {
+    return st.chokeGroup < -1 ? slot : st.chokeGroup;
+}
+
+// --- articulation loudness table (BFD3ArticLoudnessInfo.xml) -------------
+
+// Measured loudness span (dB) of one articulation type for a piece class
+// and beater. BFD3's loudness normalisation maps velocity onto this span.
+struct ArticLoudness {
+    std::string klass;  // kpi_class
+    std::string beater; // "Stick,Wood", "Brush", ...
+    std::string artic;  // articulation name
+    float min = 0, max = 0;
+};
+std::vector<ArticLoudness> loadArticLoudness(const std::string& path);
+// The table shipped with an installed BFD3 ("" when there is none).
+// OPENBFD_LOUDNESS_DB overrides the location.
+std::string findArticLoudnessFile();
+// Same match as BFD3: class + articulation, then the beater ("Stick" and
+// unknown beaters count as "Stick,Wood"), else the first class + articulation
+// entry. False when the table has no entry for the class and articulation.
+bool lookupArticLoudness(const std::vector<ArticLoudness>& table, const std::string& klass,
+                         const std::string& artic, const std::string& beater, float* min, float* max);
 
 // --- MIDI keymap ---------------------------------------------------------
 

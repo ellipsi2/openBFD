@@ -155,6 +155,13 @@ void testXmlAndKit() {
     CHECK(std::abs(loaded.pieces[0].pan - 0.25f) < 1e-5f);
     CHECK_EQ(loaded.pieces[0].arts.size(), size_t(1));
     CHECK(std::abs(loaded.pieces[0].arts[0].v2d - 0.7f) < 1e-5f);
+    // an unset choke group is the piece's own slot, written out explicitly
+    CHECK_EQ(bfdmodel::chokeGroupOf(loaded.pieces[0], 0), 0);
+    CHECK_EQ(bfdmodel::chokeGroupOf(st, 7), 7);
+    bfdmodel::KitPieceState grouped = st;
+    grouped.chokeGroup = 3;
+    CHECK_EQ(bfdmodel::chokeGroupOf(grouped, 7), 3);
+    CHECK(bfdmodel::kitToXml(kit, false).find("chokeGroup=\"0\"") != std::string::npos);
 }
 
 void testVelocityLayers() {
@@ -164,17 +171,78 @@ void testVelocityLayers() {
     CHECK(bfdengine::pickLayer(art, 0.1f) == &art.layers[0]);
     CHECK(bfdengine::pickLayer(art, 0.9f) == &art.layers[1]);
     const auto& L = art.layers;
-    // as recorded (dyn 0.5): bottom of a window plays at unity
-    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 0.5f)) < 1e-4f);
-    CHECK(std::abs(bfdengine::layerGainDb(L, 1, 1, 0.5f, 0.5f)) < 1e-4f);
+    // as recorded: bottom of a window plays at unity
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f)) < 1e-4f);
+    CHECK(std::abs(bfdengine::layerGainDb(L, 1, 1, 0.5f)) < 1e-4f);
     // up a window the level slides towards the next layer: continuous at 0.5
-    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.25f, 0.5f) - 20.0f) < 1e-3f);
-    CHECK(bfdengine::layerGainDb(L, 0, 0, 0.4999f, 0.5f) > 39.9f);
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.25f) - 20.0f) < 1e-3f);
+    CHECK(bfdengine::layerGainDb(L, 0, 0, 0.4999f) > 39.9f);
     // a stand-in is matched to the requested layer's loudness
-    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 1, 0.0f, 0.5f) - (-40.0f)) < 1e-4f);
-    // dyn 0 flattens to the loudest layer, dyn 1 doubles the range
-    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 0.0f) - 40.0f) < 1e-4f);
-    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 0, 0.0f, 1.0f) - (-40.0f)) < 1e-4f);
+    CHECK(std::abs(bfdengine::layerGainDb(L, 0, 1, 0.0f) - (-40.0f)) < 1e-4f);
+}
+
+void testDynamicsModel() {
+    using namespace bfdengine;
+    // dyn / masterDynamics shift the velocity by -1..+1 each, clamped
+    CHECK(std::abs(dynamicVelocity(0.4f, 0.5f, 0.5f) - 0.4f) < 1e-6f);
+    CHECK(std::abs(dynamicVelocity(0.4f, 0.6f, 0.5f) - 0.6f) < 1e-6f);
+    CHECK(std::abs(dynamicVelocity(0.4f, 0.5f, 0.45f) - 0.3f) < 1e-6f);
+    CHECK(dynamicVelocity(0.9f, 1.0f, 0.5f) == 1.0f);
+    CHECK(dynamicVelocity(0.1f, 0.0f, 0.5f) == 0.0f);
+
+    // loudness curve: 0 = linear, ends pinned, monotonic, convex above 0
+    CHECK(std::abs(loudnessShape(0.3f, 0.0f) - 0.3f) < 1e-6f);
+    CHECK(loudnessShape(0.0f, 0.5f) == 0.0f);
+    CHECK(loudnessShape(1.0f, 0.5f) == 1.0f);
+    float prev = 0.0f;
+    for (int i = 1; i <= 20; ++i) {
+        const float y = loudnessShape(float(i) / 20.0f, 0.65f);
+        CHECK(y >= prev - 1e-5f);
+        prev = y;
+    }
+    CHECK(loudnessShape(0.5f, 0.65f) > 0.55f);
+    // no measured span: BFD's -80..-40 dB
+    CHECK(std::abs(normalisedLoudnessDb(0, 0, 0.5f, 0) - (-60.0f)) < 1e-4f);
+    CHECK(std::abs(normalisedLoudnessDb(-70, -40, 1.0f, 0) - (-40.0f)) < 1e-4f);
+
+    // damping: off at 0; amount 1 at v2d 0.5 = 0.1 s on the ambient envelope,
+    // the direct lows / highs ring (2r+1) / (8r+1) times longer
+    const auto off = dampingDecay(0.0f, 1.0f, 0.5f, 1.0f, 44100.0);
+    CHECK(off[0] == 1.0 && off[1] == 1.0 && off[2] == 1.0);
+    const auto full = dampingDecay(1.0f, 1.0f, 0.5f, 1.0f, 44100.0);
+    CHECK(std::abs(full[0] - (1.0 - std::sin(M_PI / 4410.0))) < 1e-9);
+    CHECK(std::abs(full[1] - (1.0 - std::sin(M_PI / 13230.0))) < 1e-9);
+    CHECK(full[0] < full[1] && full[1] < full[2]);
+    const auto flat = dampingDecay(1.0f, 0.0f, 0.5f, 1.0f, 44100.0);
+    CHECK(flat[0] == flat[1] && flat[1] == flat[2]);
+    // v2d > 0.5: hard hits are damped harder than soft ones
+    CHECK(dampingDecay(0.5f, 1.0f, 1.0f, 1.0f, 44100.0)[0] < dampingDecay(0.5f, 1.0f, 1.0f, 0.2f, 44100.0)[0]);
+
+    // choke fade: base + (1 - old/new) * range
+    CHECK(std::abs(chokeFadeSec(0.2f, 0.4f, 0.5f, 1.0f) - 0.4f) < 1e-6f);
+    CHECK(std::abs(chokeFadeSec(0.2f, 0.4f, 1.0f, 0.5f) - 0.2f) < 1e-6f);
+
+    // loudness table: class + articulation, then beater ("Stick" = wood)
+    std::vector<bfdmodel::ArticLoudness> table = {
+        {"Snare", "Brush", "Hit", -70, -50}, {"Snare", "Stick,Wood", "Hit", -66, -38}, {"Tom", "Mallet", "Hit", -60, -45}};
+    float lo = 0, hi = 0;
+    CHECK(bfdmodel::lookupArticLoudness(table, "Snare", "Hit", "Stick", &lo, &hi) && lo == -66 && hi == -38);
+    CHECK(bfdmodel::lookupArticLoudness(table, "snare", "hit", "Brush", &lo, &hi) && lo == -70);
+    CHECK(bfdmodel::lookupArticLoudness(table, "Tom", "Hit", "Stick, Wood", &lo, &hi) && lo == -60);
+    CHECK(!bfdmodel::lookupArticLoudness(table, "Tom", "Rim", "", &lo, &hi));
+    const std::string tmp = "/tmp/openbfd_loudness.xml";
+    if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+        std::fputs("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><VObjectArray name=\"infoArray\" count=\"1\">"
+                   "<BFDArticLoudnessInfo kpi_class=\"Kick\" beater=\"Felt\" artic=\"Hit\" max=\"-41.5\" min=\"-70\" />"
+                   "</VObjectArray></root>",
+                   f);
+        std::fclose(f);
+    }
+    const auto parsed = bfdmodel::loadArticLoudness(tmp);
+    CHECK_EQ(parsed.size(), size_t(1));
+    CHECK(!parsed.empty() && parsed[0].max == -41.5f && parsed[0].beater == "Felt");
+    const std::string shipped = bfdmodel::findArticLoudnessFile();
+    if (!shipped.empty()) CHECK(!bfdmodel::loadArticLoudness(shipped).empty());
 }
 
 void testRealLibrary() {
@@ -636,6 +704,115 @@ void testPreloadCompletes() {
     std::printf("preload: %s %d/%d layers\n", piece->name.c_str(), engine.layersReady(), engine.layersTotal());
 }
 
+// A closed hihat stroke chokes the open one; a louder hit fades out a quieter
+// ring-out of the same piece.
+void testChokes() {
+    const char* root = std::getenv("OPENBFD_LIBRARY");
+    if (!root) return;
+    bfdmodel::Library lib;
+    std::string err;
+    if (!bfdmodel::scanLibrary(root, &lib, &err)) return;
+    const bfdmodel::Piece* hat = nullptr;
+    for (const auto& p : lib.pieces)
+        if (bfdmodel::pieceKind(*p) == bfdmodel::PieceKind::Hihat && p->findArticulation("OpenT") &&
+            p->findArticulation("ClosedT")) {
+            hat = p.get();
+            break;
+        }
+    if (!hat) return;
+    bfdengine::Engine engine;
+    engine.setSampleRate(44100.0);
+    engine.setLibraries({lib});
+    bfdmodel::Kit kit;
+    kit.slots.assign(32, {});
+    kit.pieces.resize(32);
+    const std::string ref = bfdmodel::pieceSlotKey(lib, *hat);
+    kit.slots[0] = ref;
+    kit.pieces[0].slotRef = ref;
+    engine.setKitAndKeymap(kit, {{60, 0, "OpenT"}, {61, 0, "ClosedT"}});
+    engine.waitUntilLoaded(120000);
+    engine.setMixer([&] {
+        bfdengine::MixerState mx;
+        bfdengine::autoPatch(bfdengine::listMics(engine.kit(), engine.pieceLookup()), mx);
+        return mx;
+    }());
+    const int n = 4410; // 0.1 s blocks
+    std::vector<float> l(static_cast<size_t>(n)), r(static_cast<size_t>(n));
+    std::vector<float*> outs(bfdengine::Engine::kNumOuts, nullptr);
+    outs[0] = l.data();
+    outs[1] = r.data();
+    auto run = [&](const bfdengine::NoteEvent* ev, int count) { engine.process(ev, count, outs.data(), n); };
+    bfdengine::NoteEvent open{60, 1.0f, true, 0};
+    run(&open, 1);
+    run(nullptr, 0);
+    CHECK_EQ(engine.activeVoices(), 1);
+    bfdengine::NoteEvent closed{61, 0.3f, true, 0};
+    run(&closed, 1);
+    run(nullptr, 0);
+    CHECK_EQ(engine.activeVoices(), 1); // the open hat is gone within 0.05..0.1 s
+
+    // same stroke, louder: the quiet ring-out fades over 0.5 + (1 - 0.2) * 0.5 s
+    bfdengine::NoteEvent soft{60, 0.2f, true, 0}, hard{60, 1.0f, true, 0};
+    for (int i = 0; i < 20; ++i) run(nullptr, 0);
+    run(&soft, 1);
+    run(&hard, 1);
+    const int both = engine.activeVoices();
+    for (int i = 0; i < 10; ++i) run(nullptr, 0);
+    CHECK(both >= 2);
+    CHECK(engine.activeVoices() < both);
+    std::printf("chokes: %s ok\n", hat->name.c_str());
+}
+
+// A kick with the tom resonance model makes the toms' direct mics ring.
+void testTomResonance() {
+    const char* root = std::getenv("OPENBFD_LIBRARY");
+    if (!root) return;
+    bfdmodel::Library lib;
+    std::string err;
+    if (!bfdmodel::scanLibrary(root, &lib, &err)) return;
+    const bfdmodel::Piece *kick = nullptr, *tom = nullptr;
+    for (const auto& p : lib.pieces) {
+        const auto kind = bfdmodel::pieceKind(*p);
+        if (kind == bfdmodel::PieceKind::Kick && !kick) kick = p.get();
+        if (kind == bfdmodel::PieceKind::Tom && !tom) tom = p.get();
+    }
+    if (!kick || !tom) return;
+    auto tomEnergy = [&](bool model, int note) {
+        bfdengine::Engine engine;
+        engine.setSampleRate(44100.0);
+        engine.setLibraries({lib});
+        bfdmodel::Kit kit;
+        kit.slots.assign(32, {});
+        kit.pieces.resize(32);
+        kit.slots[0] = kit.pieces[0].slotRef = bfdmodel::pieceSlotKey(lib, *kick);
+        kit.slots[1] = kit.pieces[1].slotRef = bfdmodel::pieceSlotKey(lib, *tom);
+        kit.pieces[0].model.tomResActive = model;
+        engine.setKitAndKeymap(kit, {{36, 0, "Hit"}, {48, 1, "Hit"}});
+        engine.waitUntilLoaded(120000);
+        bfdengine::MixerState mx;
+        bfdengine::autoPatch(bfdengine::listMics(engine.kit(), engine.pieceLookup()), mx);
+        engine.setMixer(mx);
+        std::vector<std::vector<float>> bufs(bfdengine::Engine::kNumOuts, std::vector<float>(44100));
+        std::vector<float*> outs;
+        for (auto& b : bufs) outs.push_back(b.data());
+        bfdengine::NoteEvent on{note, 1.0f, true, 0};
+        engine.process(&on, 1, outs.data(), 44100);
+        double e = 0;
+        for (const auto& ch : tom->channels) {
+            if (!bfdmodel::isOwnChannel(bfdmodel::PieceKind::Tom, ch)) continue;
+            const bfdengine::Jack j = mx.jackOf("D:1:" + ch.name);
+            if (!j.valid()) continue;
+            for (float v : bufs[size_t(2 + j.strip * 2 + j.side)]) e += double(v) * v;
+        }
+        return e;
+    };
+    const double off = tomEnergy(false, 36), on = tomEnergy(true, 36), hit = tomEnergy(false, 48);
+    CHECK(off == 0.0);
+    CHECK(on > 0.0);
+    std::printf("tom resonance: %s -> %s, %.1f dB below a tom hit\n", kick->name.c_str(), tom->name.c_str(),
+                10.0 * std::log10(hit / std::max(on, 1e-12)));
+}
+
 void testEngineSmoke() {
     const char* root = std::getenv("OPENBFD_LIBRARY");
     if (!root) return;
@@ -695,6 +872,7 @@ int main() {
     testSyntheticBlocks();
     testXmlAndKit();
     testVelocityLayers();
+    testDynamicsModel();
     testStreamingDecode();
     testStreamingFileAgainstResident();
     testBleedRouting();
@@ -704,6 +882,8 @@ int main() {
     testRealLibrary();
     testPreloadCompletes();
     testEngineSmoke();
+    testChokes();
+    testTomResonance();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;
